@@ -22,7 +22,10 @@ const aiSettingsSchema = new mongoose.Schema(
 
     gemini: {
       enabled: { type: Boolean, default: true },
-      model: { type: String, default: "gemini-3.6-flash" },
+      // Must match DEFAULT_MODEL in services/gemini.js. If they differ, a key is
+      // validated against one model on save and then used against another at
+      // run time — which passes at save and fails in production.
+      model: { type: String, default: "gemini-3.8-flash" },
       apiKey: { type: encryptedValueSchema, default: null },
       maskedKey: { type: String, default: null },
       lastVerifiedAt: { type: Date, default: null },
