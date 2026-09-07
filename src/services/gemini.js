@@ -30,8 +30,9 @@ function normalizeError(error) {
 /**
  * One cheap call, purely to find out whether a key works.
  *
- * The error object is deliberately not logged — provider errors can echo the
- * request back, key included.
+ * The error object is never logged whole — provider errors can echo the
+ * request back, key included. Status and message are enough to tell a missing
+ * model from a dead key, and neither carries the credential.
  */
 export async function verifyGeminiKey(apiKey, model = DEFAULT_MODEL) {
   try {
@@ -42,6 +43,32 @@ export async function verifyGeminiKey(apiKey, model = DEFAULT_MODEL) {
       config: { maxOutputTokens: 1 },
     });
     return { ok: true, model };
+  } catch (error) {
+    const code = normalizeError(error);
+    console.warn(
+      `[gemini] verify failed model=${model} code=${code} status=${
+        error?.status ?? error?.response?.status ?? "?"
+      } message=${String(error?.message ?? "").slice(0, 300)}`,
+    );
+    return { ok: false, error: code };
+  }
+}
+
+/**
+ * The models this key may actually use.
+ *
+ * "Model not available" is otherwise a dead end: the caller cannot tell a
+ * retired model from a project that was never granted access, and guessing
+ * names one at a time is a poor way to find out.
+ */
+export async function listGeminiModels(apiKey) {
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const names = [];
+    for await (const model of await ai.models.list()) {
+      names.push(model.name ?? model.baseModelId ?? String(model));
+    }
+    return { ok: true, models: names };
   } catch (error) {
     return { ok: false, error: normalizeError(error) };
   }
