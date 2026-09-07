@@ -22,7 +22,7 @@ const aiSettingsSchema = new mongoose.Schema(
 
     gemini: {
       enabled: { type: Boolean, default: true },
-      model: { type: String, default: "gemini-2.5-flash" },
+      model: { type: String, default: "gemini-3.6-flash" },
       apiKey: { type: encryptedValueSchema, default: null },
       maskedKey: { type: String, default: null },
       lastVerifiedAt: { type: Date, default: null },

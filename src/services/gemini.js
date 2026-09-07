@@ -1,6 +1,11 @@
 import { GoogleGenAI } from "@google/genai";
 
-const DEFAULT_MODEL = "gemini-2.5-flash";
+/**
+ * Google closed gemini-2.5-flash to new users and named this as the
+ * replacement in the 404 itself. Flash rather than Pro on purpose: this is
+ * BYOK, so it is the merchant's quota, and Flash is what the free tier covers.
+ */
+const DEFAULT_MODEL = "gemini-3.6-flash";
 
 /**
  * Map a provider failure onto a code the caller can act on.
@@ -87,18 +92,39 @@ export async function suggestFlashModels(apiKey) {
   const list = await listGeminiModels(apiKey);
   if (!list.ok) return [];
 
-  return list.models
-    .map((name) => name.replace(/^models\//, ""))
-    // Flash only: the free tier stopped covering Pro models in 2026, so
-    // offering one would send the user into a billing wall.
-    .filter(
-      (name) =>
-        name.includes("flash") &&
-        !name.includes("image") &&
-        !name.includes("tts") &&
-        !name.includes("live"),
-    )
-    .sort()
-    .reverse()
-    .slice(0, 5);
+  // Listed does not mean usable. A key's model list includes entries it cannot
+  // call — gemini-2.5-flash is listed for every key and 404s for new ones —
+  // and many "flash" entries are audio, image or realtime variants that
+  // generateContent cannot drive at all.
+  const EXCLUDED = [
+    "image",
+    "tts",
+    "live",
+    "audio",
+    "omni",
+    "transcribe",
+    "embedding",
+    // Closed to new users; Google's own 404 points at gemini-3.6-flash.
+    "2.5-flash",
+    "2.0-flash",
+  ];
+
+  return (
+    list.models
+      .map((name) => name.replace(/^models\//, ""))
+      // Flash only: the free tier stopped covering Pro models in 2026, so
+      // offering one would send the user into a billing wall.
+      .filter(
+        (name) =>
+          name.includes("flash") &&
+          !EXCLUDED.some((word) => name.includes(word)) &&
+          // Previews are withdrawn without notice — a poor thing to hand
+          // someone as a default they will store and forget.
+          !name.includes("preview") &&
+          !name.endsWith("-latest"),
+      )
+      .sort()
+      .reverse()
+      .slice(0, 5)
+  );
 }
