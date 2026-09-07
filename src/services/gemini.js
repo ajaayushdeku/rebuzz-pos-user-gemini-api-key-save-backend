@@ -5,7 +5,7 @@ import { GoogleGenAI } from "@google/genai";
  * replacement in the 404 itself. Flash rather than Pro on purpose: this is
  * BYOK, so it is the merchant's quota, and Flash is what the free tier covers.
  */
-const DEFAULT_MODEL = "gemini-3.6-flash";
+const DEFAULT_MODEL = "gemini-3.8-flash";
 
 /**
  * Map a provider failure onto a code the caller can act on.
