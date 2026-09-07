@@ -1,0 +1,20 @@
+{
+  "name": "rebuzz-ai-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stores each business's own Gemini API key and makes model calls on their behalf.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch --env-file=.env src/index.js",
+    "start": "node --env-file=.env src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "mongoose": "^8.9.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
