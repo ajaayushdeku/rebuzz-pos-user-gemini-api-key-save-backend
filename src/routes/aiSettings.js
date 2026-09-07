@@ -3,7 +3,9 @@ import { Router } from "express";
 import AISettings from "../models/AISettings.js";
 import requireBusiness from "../middleware/requireBusiness.js";
 import { decrypt, encrypt, maskKey } from "../lib/crypto.js";
-import { suggestFlashModels, verifyGeminiKey } from "../services/gemini.js";
+// verifyGeminiKey / suggestFlashModels are used by POST /test below, and by
+// the paused verification block in POST /.
+import { verifyGeminiKey } from "../services/gemini.js";
 
 const router = Router();
 
@@ -35,19 +37,26 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ error: "API_KEY_REQUIRED" });
   }
 
-  // Verified before it is stored. A typo'd key accepted silently surfaces
-  // days later as a broken dashboard nobody can explain.
-  const check = await verifyGeminiKey(apiKey, model || undefined);
-  if (!check.ok) {
-    // A missing model is otherwise a dead end — the key is fine and the user
-    // has no way to know what to put instead. Ask Google what this key can
-    // actually use and hand the names back.
-    if (check.error === "GEMINI_MODEL_UNAVAILABLE") {
-      const available = await suggestFlashModels(apiKey);
-      return res.status(400).json({ error: check.error, available });
-    }
-    return res.status(400).json({ error: check.error });
-  }
+  // ── Gemini verification, paused ──────────────────────────────────────────
+  // Deliberately skipped for now: the key is stored without asking Google
+  // whether it works. That means an unusable key saves cleanly and only fails
+  // when a real AI feature runs, so `lastVerifiedAt` stays null below — the
+  // record should not claim a check that never happened.
+  //
+  // Restore this block, and the lastVerifiedAt line, to turn validation back
+  // on. `POST /test` still verifies on demand in the meantime.
+  //
+  // const check = await verifyGeminiKey(apiKey, model || undefined);
+  // if (!check.ok) {
+  //   // A missing model is otherwise a dead end — the key is fine and the
+  //   // user has no way to know what to put instead. Ask Google what this key
+  //   // can actually use and hand the names back.
+  //   if (check.error === "GEMINI_MODEL_UNAVAILABLE") {
+  //     const available = await suggestFlashModels(apiKey);
+  //     return res.status(400).json({ error: check.error, available });
+  //   }
+  //   return res.status(400).json({ error: check.error });
+  // }
 
   const settings = await AISettings.findOneAndUpdate(
     { businessId: req.businessId },
@@ -56,7 +65,9 @@ router.post("/", async (req, res) => {
       "gemini.apiKey": encrypt(apiKey),
       "gemini.maskedKey": maskKey(apiKey),
       "gemini.enabled": true,
-      "gemini.lastVerifiedAt": new Date(),
+      // Null while verification is paused — see the block above. Stamping a
+      // date here would record a check that did not happen.
+      "gemini.lastVerifiedAt": null,
       ...(model ? { "gemini.model": model } : {}),
     },
     { new: true, upsert: true, setDefaultsOnInsert: true },
