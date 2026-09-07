@@ -29,7 +29,7 @@ const app = express();
 app.use(
   cors({
     // One named origin, not "*" — these routes carry a bearer token.
-    origin: process.env.CORS_ORIGIN ?? "http://localhost:3000",
+    origin: process.env.CORS_ORIGIN ?? "http://localhost:4000",
     credentials: true,
   }),
 );

@@ -3,7 +3,7 @@ import { Router } from "express";
 import AISettings from "../models/AISettings.js";
 import requireBusiness from "../middleware/requireBusiness.js";
 import { decrypt, encrypt, maskKey } from "../lib/crypto.js";
-import { verifyGeminiKey } from "../services/gemini.js";
+import { suggestFlashModels, verifyGeminiKey } from "../services/gemini.js";
 
 const router = Router();
 
@@ -39,6 +39,13 @@ router.post("/", async (req, res) => {
   // days later as a broken dashboard nobody can explain.
   const check = await verifyGeminiKey(apiKey, model || undefined);
   if (!check.ok) {
+    // A missing model is otherwise a dead end — the key is fine and the user
+    // has no way to know what to put instead. Ask Google what this key can
+    // actually use and hand the names back.
+    if (check.error === "GEMINI_MODEL_UNAVAILABLE") {
+      const available = await suggestFlashModels(apiKey);
+      return res.status(400).json({ error: check.error, available });
+    }
     return res.status(400).json({ error: check.error });
   }
 

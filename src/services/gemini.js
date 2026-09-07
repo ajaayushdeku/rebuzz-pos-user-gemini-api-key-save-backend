@@ -73,3 +73,32 @@ export async function listGeminiModels(apiKey) {
     return { ok: false, error: normalizeError(error) };
   }
 }
+
+/**
+ * Flash models this key can use, newest first.
+ *
+ * Called only when a model has already 404'd, to turn a dead end into a
+ * choice. Deliberately derived from Google's own answer rather than a
+ * hardcoded allowlist: the model line moves, and a static list would start
+ * rejecting names that are perfectly valid — the same trap as validating an
+ * API key by its prefix.
+ */
+export async function suggestFlashModels(apiKey) {
+  const list = await listGeminiModels(apiKey);
+  if (!list.ok) return [];
+
+  return list.models
+    .map((name) => name.replace(/^models\//, ""))
+    // Flash only: the free tier stopped covering Pro models in 2026, so
+    // offering one would send the user into a billing wall.
+    .filter(
+      (name) =>
+        name.includes("flash") &&
+        !name.includes("image") &&
+        !name.includes("tts") &&
+        !name.includes("live"),
+    )
+    .sort()
+    .reverse()
+    .slice(0, 5);
+}
