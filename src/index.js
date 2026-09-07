@@ -37,9 +37,25 @@ app.use(
 // Small cap: the largest legitimate body here is a briefing of a few KB.
 app.use(express.json({ limit: "256kb" }));
 
-// Deliberately no request-body logging anywhere in this service. Two routes
-// carry a raw Gemini key in the body, and body-logging middleware is the
-// most common way credentials reach a log file.
+/**
+ * Method, path and status only.
+ *
+ * Deliberately never the body: two routes carry a raw Gemini key in theirs,
+ * and body-logging middleware is the most common way credentials reach a log
+ * file. Path and status are enough to answer "did the request arrive", which
+ * is otherwise invisible when a route fails before doing any work of its own.
+ */
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on("finish", () => {
+    console.info(
+      `[req] ${req.method} ${req.originalUrl} → ${res.statusCode} (${
+        Date.now() - startedAt
+      }ms)`,
+    );
+  });
+  next();
+});
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
