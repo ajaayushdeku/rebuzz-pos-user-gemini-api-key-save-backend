@@ -19,7 +19,7 @@ export default async function requireBusiness(req, res, next) {
 
   let upstream;
   try {
-    upstream = await fetch(`${POS_API_URL}/business`, {
+    upstream = await fetch(`${POS_API_URL}/business/aboutBusiness`, {
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
@@ -42,8 +42,11 @@ export default async function requireBusiness(req, res, next) {
   }
 
   const json = await upstream.json().catch(() => null);
-  // TODO: confirm against the real /business response; these two are guesses.
-  const businessId = json?.data?._id ?? json?.data?.business?._id ?? null;
+
+  // Shape confirmed against the POS API: { data: { business: { _id, ... } } }.
+  // `_id` is the tenant, not `adminId` — one admin can hold several
+  // businesses, and scoping by the admin would pool their keys together.
+  const businessId = json?.data?.business?._id ?? null;
 
   if (!businessId) {
     return res.status(502).json({ error: "AUTH_UPSTREAM_SHAPE" });
