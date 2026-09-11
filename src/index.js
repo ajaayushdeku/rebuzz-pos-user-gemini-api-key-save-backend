@@ -4,6 +4,7 @@ import cors from "cors";
 import { connectDatabase, disconnectDatabase } from "./config/db.js";
 import { assertEncryptionReady } from "./lib/crypto.js";
 import aiSettingsRouter from "./routes/aiSettings.js";
+import aiInsightsRouter from "./routes/aiInsights.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
 
@@ -62,6 +63,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/api/settings/ai", aiSettingsRouter);
+app.use("/api/ai-insights", aiInsightsRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "NOT_FOUND" });

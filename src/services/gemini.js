@@ -128,3 +128,76 @@ export async function suggestFlashModels(apiKey) {
       .slice(0, 5)
   );
 }
+
+/**
+ * One insight call, on the business's own key and quota.
+ *
+ * The caller supplies all three inputs, and each does a different job:
+ *
+ * - `briefing` is the facts. The model cannot see the database, so this is a
+ *   short written summary of the figures already on screen.
+ * - `systemInstruction` is the job description. Who the model is answering as,
+ *   and what it is for.
+ * - `responseSchema` is the form to fill in. Without it the model returns
+ *   prose, which has to be parsed by guesswork and renders differently every
+ *   time. With it, the answer arrives as fields the UI can lay out.
+ *
+ * A low temperature on purpose: the same figures asked twice should not
+ * produce two different verdicts, and a merchant comparing yesterday's card to
+ * today's would have no way to tell a real change from a reworded one.
+ */
+export async function generateInsights(
+  apiKey,
+  { briefing, systemInstruction, responseSchema, model = DEFAULT_MODEL },
+) {
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: briefing,
+      config: {
+        ...(systemInstruction ? { systemInstruction } : {}),
+        // Both or neither. A schema without the JSON mime type is ignored, and
+        // the model quietly goes back to prose.
+        ...(responseSchema
+          ? {
+              responseMimeType: "application/json",
+              responseSchema,
+            }
+          : {}),
+        temperature: 0.2,
+        maxOutputTokens: 2048,
+      },
+    });
+
+    const text = response.text ?? "";
+
+    if (!text.trim()) {
+      // An empty body is usually a safety block or a truncated response, and
+      // it is not a provider error — the call succeeded and said nothing.
+      return { ok: false, error: "GEMINI_EMPTY_RESPONSE" };
+    }
+
+    return {
+      ok: true,
+      text,
+      model,
+      // Passed back so the caller can show what the request cost. It is the
+      // merchant's own quota being spent, so it should not be invisible.
+      usage: {
+        promptTokens: response.usageMetadata?.promptTokenCount ?? null,
+        outputTokens: response.usageMetadata?.candidatesTokenCount ?? null,
+        totalTokens: response.usageMetadata?.totalTokenCount ?? null,
+      },
+    };
+  } catch (error) {
+    const code = normalizeError(error);
+    console.warn(
+      `[gemini] insights failed model=${model} code=${code} status=${
+        error?.status ?? error?.response?.status ?? "?"
+      } message=${String(error?.message ?? "").slice(0, 300)}`,
+    );
+    return { ok: false, error: code };
+  }
+}

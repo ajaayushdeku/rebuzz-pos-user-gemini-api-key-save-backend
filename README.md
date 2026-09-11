@@ -50,20 +50,37 @@ re-entered by its business.
 
 ## Endpoints
 
-| Method   | Path           | Does                                                    |
-| -------- | -------------- | ------------------------------------------------------- |
-| `GET`    | `/ai-key`      | `{ hasKey, maskedKey, updatedAt }` — never the key       |
-| `PUT`    | `/ai-key`      | `{ apiKey }` → validate against Gemini, encrypt, store   |
-| `DELETE` | `/ai-key`      | Remove this business's key                               |
-| `POST`   | `/ai-insights` | `{ briefing, systemInstruction, responseSchema }` → insights |
+| Method   | Path                    | Does                                                          |
+| -------- | ----------------------- | ------------------------------------------------------------- |
+| `GET`    | `/api/settings/ai`      | Safe metadata only — configured, enabled, model, masked key    |
+| `POST`   | `/api/settings/ai`      | `{ apiKey, model? }` → encrypt and store                       |
+| `PATCH`  | `/api/settings/ai`      | Toggle `enabled` or change the model. Cannot set the key       |
+| `DELETE` | `/api/settings/ai`      | Forget this business's key                                     |
+| `POST`   | `/api/settings/ai/test` | Verify a supplied key, or re-verify the stored one             |
+| `POST`   | `/api/ai-insights`      | `{ briefing, systemInstruction?, responseSchema? }` → insights |
 
-`PUT` makes one cheap Gemini call before storing. A typo'd key that fails
-silently at save time surfaces days later as a broken dashboard.
+Save-time verification is currently **paused** — see the commented block in
+`routes/aiSettings.js`. A key is stored without asking Google whether it works,
+so `lastVerifiedAt` stays null rather than claiming a check that never
+happened. The consequence is that a typo'd key saves cleanly and only fails
+when a real feature runs. `POST /api/settings/ai/test` verifies on demand in
+the meantime.
 
 Failures are distinguished, because it is the business's own key and quota:
 invalid key, quota exceeded, and model error need three different messages.
-`POST /ai-insights` returns **424** when no key is saved, which the frontend
-uses to send the user to settings rather than show a dead error.
+
+`POST /api/ai-insights` returns **424** both when no key is saved and when the
+business has switched Gemini off. Failed Dependency rather than an error,
+because nothing is wrong with the request: a precondition the merchant controls
+is missing. The frontend can treat the status alone as "send them to settings"
+and use the code — `NOT_CONFIGURED` or `AI_DISABLED` — to pick the sentence.
+Upstream Gemini failures come back as **502** with the same error vocabulary
+the settings route already uses.
+
+The caller supplies the briefing; this service does not fetch POS analytics
+itself. That keeps an insight card and the chart above it built from the same
+numbers, so the two cannot disagree. `requireBusiness` still stashes the
+caller's POS token for the day that decision is revisited.
 
 ## Getting started
 
@@ -76,5 +93,6 @@ npm run dev
 
 ## Status
 
-Scaffold only. `src/` has the directory layout; no route, model or service code
-is written yet.
+Working. Key storage, the settings routes and insight generation are
+implemented. Still to build: the briefing writer and the card that shows the
+result, both of which live in the frontend.
