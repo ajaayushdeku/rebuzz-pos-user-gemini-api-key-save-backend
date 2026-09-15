@@ -4,6 +4,7 @@ import AISettings from "../models/AISettings.js";
 import requireBusiness from "../middleware/requireBusiness.js";
 import { decrypt } from "../lib/crypto.js";
 import { generateInsights } from "../services/gemini.js";
+import { insightsRateLimit } from "../lib/rateLimit.js";
 
 /**
  * The one place a stored key is ever used.
@@ -25,6 +26,10 @@ const router = Router();
 
 router.use(requireBusiness);
 
+// Quota guard: this is the route that spends the merchant's Gemini budget,
+// so the burst limit applies before any validation or decryption work.
+router.use(insightsRateLimit());
+
 /**
  * Roughly four thousand tokens of input.
  *
@@ -39,6 +44,10 @@ const MAX_BRIEFING_CHARS = 16_000;
 const MAX_INSTRUCTION_CHARS = 4_000;
 
 router.post("/", async (req, res) => {
+  // Paired with the success log at the end: without a start time, a slow
+  // success and a stalled call are indistinguishable from the dashboard.
+  const startedAt = Date.now();
+
   const briefing =
     typeof req.body?.briefing === "string" ? req.body.briefing.trim() : "";
   const systemInstruction =
@@ -104,6 +113,19 @@ router.post("/", async (req, res) => {
      * same vocabulary the settings route already speaks, so the frontend's
      * existing error messages cover this route for free.
      */
+    // One structured line per failed insight call: which tenant, which model,
+    // which failure, what it cost, and how long it took. The briefing is never
+    // logged — it is merchant sales data, and logs are the wrong place for it.
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        event: "insights.failed",
+        businessId: req.businessId,
+        model: settings.gemini.model || null,
+        error: result.error,
+        durationMs: Date.now() - startedAt,
+      }),
+    );
     return res.status(502).json({ error: result.error });
   }
 
@@ -136,6 +158,23 @@ router.post("/", async (req, res) => {
       generatedAt: new Date().toISOString(),
     },
   });
+
+  // The success counterpart to the failure log above: per-call token
+  // accounting, so quota spend per tenant is visible without asking Google.
+  // `usage` can be all nulls when the provider omits it — still worth logging,
+  // because the call itself cost something even when the accounting is missing.
+  // `durationMs` pairs with it: a slow success and a failed call look the same
+  // from the dashboard, and only this line tells them apart.
+  console.info(
+    JSON.stringify({
+      level: "info",
+      event: "insights.generated",
+      businessId: req.businessId,
+      model: result.model,
+      usage: result.usage,
+      durationMs: Date.now() - startedAt,
+    }),
+  );
 });
 
 export default router;

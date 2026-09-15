@@ -23,6 +23,21 @@ function assertConfigured() {
     throw new Error(`Missing required env: ${missing.join(", ")}`);
   }
   assertEncryptionReady();
+
+  // CORS_ORIGIN is where the frontend runs. It is inert while the only caller
+  // is the Next.js proxy (server-to-server fetches send no Origin header), but
+  // a browser calling this service directly with the fallback still set gets a
+  // silent CORS block. Fail loudly at boot instead, unless explicitly allowed.
+  if (
+    process.env.NODE_ENV === "production" &&
+    !process.env.CORS_ORIGIN &&
+    process.env.ALLOW_DEFAULT_CORS !== "true"
+  ) {
+    throw new Error(
+      "CORS_ORIGIN is not set: refusing to boot in production with the localhost fallback. " +
+        "Set CORS_ORIGIN to the frontend origin, or ALLOW_DEFAULT_CORS=true if this service is never called by a browser.",
+    );
+  }
 }
 
 const app = express();
@@ -30,7 +45,9 @@ const app = express();
 app.use(
   cors({
     // One named origin, not "*" — these routes carry a bearer token.
-    origin: process.env.CORS_ORIGIN ?? "http://localhost:4000",
+    // Inert while the only caller is the Next.js proxy, which sends no Origin
+    // header; the fallback matters as soon as a browser calls this directly.
+    origin: process.env.CORS_ORIGIN ?? "http://localhost:3000",
     credentials: true,
   }),
 );

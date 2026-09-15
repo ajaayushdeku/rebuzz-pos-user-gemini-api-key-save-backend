@@ -1,11 +1,16 @@
 import { GoogleGenAI } from "@google/genai";
 
 /**
- * Google closed gemini-2.5-flash to new users and named this as the
- * replacement in the 404 itself. Flash rather than Pro on purpose: this is
+ * Current stable Flash model, and the one Google's own 404 names as the
+ * replacement for the older ones. Flash rather than Pro on purpose: this is
  * BYOK, so it is the merchant's quota, and Flash is what the free tier covers.
+ *
+ * The model line moves — 2.0-flash has since been shut down and 2.5-flash is
+ * closed to new users — so this is a default, not an allowlist. A key that
+ * cannot call this model is caught at save time and offered the ones it can
+ * use; see suggestFlashModels below.
  */
-const DEFAULT_MODEL = "gemini-3.8-flash";
+const DEFAULT_MODEL = "gemini-3.6-flash";
 
 /**
  * Map a provider failure onto a code the caller can act on.
@@ -130,7 +135,7 @@ export async function suggestFlashModels(apiKey) {
 }
 
 /**
- * One insight call, on the business's own key and quota.
+ * One insight call, on the business's own key and quota — with retries.
  *
  * The caller supplies all three inputs, and each does a different job:
  *
@@ -142,62 +147,111 @@ export async function suggestFlashModels(apiKey) {
  *   prose, which has to be parsed by guesswork and renders differently every
  *   time. With it, the answer arrives as fields the UI can lay out.
  *
- * A low temperature on purpose: the same figures asked twice should not
- * produce two different verdicts, and a merchant comparing yesterday's card to
- * today's would have no way to tell a real change from a reworded one.
+ * Transient upstream failures (busy model, per-minute quota) are retried with
+ * a backoff before being reported, so a demand spike shows up as a slightly
+ * slower card rather than an error. Retries happen here rather than in the
+ * browser: the loop stays out of the rate limiter's accounting (each UI-driven
+ * retry would otherwise burn one of the 20 hourly slots for the same user
+ * request), and the merchant's key never has to leave this process.
  */
 export async function generateInsights(
   apiKey,
   { briefing, systemInstruction, responseSchema, model = DEFAULT_MODEL },
 ) {
-  try {
-    const ai = new GoogleGenAI({ apiKey });
+  let lastError = "GEMINI_UNAVAILABLE";
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: briefing,
-      config: {
-        ...(systemInstruction ? { systemInstruction } : {}),
-        // Both or neither. A schema without the JSON mime type is ignored, and
-        // the model quietly goes back to prose.
-        ...(responseSchema
-          ? {
-              responseMimeType: "application/json",
-              responseSchema,
-            }
-          : {}),
-        temperature: 0.2,
-        maxOutputTokens: 2048,
-      },
-    });
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await generateOnce(apiKey, {
+        briefing,
+        systemInstruction,
+        responseSchema,
+        model,
+      });
+    } catch (error) {
+      const code = normalizeError(error);
+      lastError = code;
+      console.warn(
+        `[gemini] insights failed model=${model} code=${code} status=${
+          error?.status ?? error?.response?.status ?? "?"
+        } attempt=${attempt + 1} message=${String(error?.message ?? "").slice(0, 300)}`,
+      );
 
-    const text = response.text ?? "";
+      if (!RETRYABLE.has(code) || attempt === RETRY_DELAYS_MS.length) {
+        return { ok: false, error: code };
+      }
 
-    if (!text.trim()) {
-      // An empty body is usually a safety block or a truncated response, and
-      // it is not a provider error — the call succeeded and said nothing.
-      return { ok: false, error: "GEMINI_EMPTY_RESPONSE" };
+      await sleep(RETRY_DELAYS_MS[attempt]);
     }
-
-    return {
-      ok: true,
-      text,
-      model,
-      // Passed back so the caller can show what the request cost. It is the
-      // merchant's own quota being spent, so it should not be invisible.
-      usage: {
-        promptTokens: response.usageMetadata?.promptTokenCount ?? null,
-        outputTokens: response.usageMetadata?.candidatesTokenCount ?? null,
-        totalTokens: response.usageMetadata?.totalTokenCount ?? null,
-      },
-    };
-  } catch (error) {
-    const code = normalizeError(error);
-    console.warn(
-      `[gemini] insights failed model=${model} code=${code} status=${
-        error?.status ?? error?.response?.status ?? "?"
-      } message=${String(error?.message ?? "").slice(0, 300)}`,
-    );
-    return { ok: false, error: code };
   }
+
+  // Unreachable — the loop returns on every path — but keeps the contract
+  // honest for the compiler and for anyone reading without the loop in mind.
+  return { ok: false, error: lastError };
 }
+
+/** One Gemini call. Extracted so generateInsights can retry it. */
+async function generateOnce(
+  apiKey,
+  { briefing, systemInstruction, responseSchema, model },
+) {
+  const ai = new GoogleGenAI({ apiKey });
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: briefing,
+    config: {
+      ...(systemInstruction ? { systemInstruction } : {}),
+      // Both or neither. A schema without the JSON mime type is ignored, and
+      // the model quietly goes back to prose.
+      ...(responseSchema
+        ? {
+            responseMimeType: "application/json",
+            responseSchema,
+          }
+        : {}),
+      temperature: 0.2,
+      maxOutputTokens: 2048,
+    },
+  });
+
+  const text = response.text ?? "";
+
+  if (!text.trim()) {
+    // An empty body is usually a safety block or a truncated response, and
+    // it is not a provider error — the call succeeded and said nothing.
+    return { ok: false, error: "GEMINI_EMPTY_RESPONSE" };
+  }
+
+  return {
+    ok: true,
+    text,
+    model,
+    // Passed back so the caller can show what the request cost. It is the
+    // merchant's own quota being spent, so it should not be invisible.
+    usage: {
+      promptTokens: response.usageMetadata?.promptTokenCount ?? null,
+      outputTokens: response.usageMetadata?.candidatesTokenCount ?? null,
+      totalTokens: response.usageMetadata?.totalTokenCount ?? null,
+    },
+  };
+}
+
+/**
+ * Codes worth another attempt, and no others.
+ *
+ * `GEMINI_UNAVAILABLE` is Google saying "the model is busy" (503) — spikes are
+ * usually over in seconds, so waiting and retrying turns a user-visible error
+ * into a slightly slower success. `GEMINI_RATE_LIMIT` is a per-minute quota
+ * bump (429) — one retry after a pause is usually enough. Everything else
+ * (invalid key, quota exhausted, malformed output) fails the same way on
+ * every attempt, so retrying would just bill waiting time.
+ */
+const RETRYABLE = new Set(["GEMINI_UNAVAILABLE", "GEMINI_RATE_LIMIT"]);
+
+/** Delays before the 2nd and 3rd attempt. Under 10 s total, so the dashboard
+ * request stays well inside the proxy's patience while covering a typical
+ * demand spike. */
+const RETRY_DELAYS_MS = [2_000, 6_000];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

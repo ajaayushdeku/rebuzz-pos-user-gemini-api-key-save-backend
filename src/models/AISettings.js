@@ -22,10 +22,11 @@ const aiSettingsSchema = new mongoose.Schema(
 
     gemini: {
       enabled: { type: Boolean, default: true },
-      // Must match DEFAULT_MODEL in services/gemini.js. If they differ, a key is
-      // validated against one model on save and then used against another at
-      // run time — which passes at save and fails in production.
-      model: { type: String, default: "gemini-3.8-flash" },
+      // Default only. POST / overwrites this with the model it actually
+      // verified, so a saved key can never be used against a model it was not
+      // tested with. PATCH still accepts any string, unverified — it exists so
+      // a user can switch to one of the names a failed check handed back.
+      model: { type: String, default: "gemini-3.6-flash" },
       apiKey: { type: encryptedValueSchema, default: null },
       maskedKey: { type: String, default: null },
       lastVerifiedAt: { type: Date, default: null },

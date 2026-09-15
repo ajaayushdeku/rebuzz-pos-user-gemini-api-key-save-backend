@@ -3,9 +3,11 @@ import { Router } from "express";
 import AISettings from "../models/AISettings.js";
 import requireBusiness from "../middleware/requireBusiness.js";
 import { decrypt, encrypt, maskKey } from "../lib/crypto.js";
-// verifyGeminiKey / suggestFlashModels are used by POST /test below, and by
-// the paused verification block in POST /.
-import { verifyGeminiKey } from "../services/gemini.js";
+// verifyGeminiKey backs both the save-time check in POST / and POST /test.
+// suggestFlashModels is reachable only through the save-time check, which is
+// the one place a model can be found to be unavailable before it is stored.
+import { suggestFlashModels, verifyGeminiKey } from "../services/gemini.js";
+import { verifyRateLimit } from "../lib/rateLimit.js";
 
 const router = Router();
 
@@ -37,26 +39,22 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ error: "API_KEY_REQUIRED" });
   }
 
-  // ── Gemini verification, paused ──────────────────────────────────────────
-  // Deliberately skipped for now: the key is stored without asking Google
-  // whether it works. That means an unusable key saves cleanly and only fails
-  // when a real AI feature runs, so `lastVerifiedAt` stays null below — the
-  // record should not claim a check that never happened.
-  //
-  // Restore this block, and the lastVerifiedAt line, to turn validation back
-  // on. `POST /test` still verifies on demand in the meantime.
-  //
-  // const check = await verifyGeminiKey(apiKey, model || undefined);
-  // if (!check.ok) {
-  //   // A missing model is otherwise a dead end — the key is fine and the
-  //   // user has no way to know what to put instead. Ask Google what this key
-  //   // can actually use and hand the names back.
-  //   if (check.error === "GEMINI_MODEL_UNAVAILABLE") {
-  //     const available = await suggestFlashModels(apiKey);
-  //     return res.status(400).json({ error: check.error, available });
-  //   }
-  //   return res.status(400).json({ error: check.error });
-  // }
+  // ── Ask Google before storing ────────────────────────────────────────────
+  // A key that cannot make a call is worse than no key at all: it saves
+  // cleanly, and the failure only surfaces later inside a feature that then
+  // looks broken for some unrelated reason. One cheap call here costs a second
+  // and turns that into a sentence next to the field the user just typed in.
+  const check = await verifyGeminiKey(apiKey, model || undefined);
+  if (!check.ok) {
+    // A missing model is otherwise a dead end — the key is fine and the user
+    // has no way to know what to put instead. Ask Google what this key can
+    // actually use and hand the names back.
+    if (check.error === "GEMINI_MODEL_UNAVAILABLE") {
+      const available = await suggestFlashModels(apiKey);
+      return res.status(400).json({ error: check.error, available });
+    }
+    return res.status(400).json({ error: check.error });
+  }
 
   const settings = await AISettings.findOneAndUpdate(
     { businessId: req.businessId },
@@ -65,10 +63,14 @@ router.post("/", async (req, res) => {
       "gemini.apiKey": encrypt(apiKey),
       "gemini.maskedKey": maskKey(apiKey),
       "gemini.enabled": true,
-      // Null while verification is paused — see the block above. Stamping a
-      // date here would record a check that did not happen.
-      "gemini.lastVerifiedAt": null,
-      ...(model ? { "gemini.model": model } : {}),
+      // Records a check that actually happened: this line is only reached
+      // after the block above returned ok.
+      "gemini.lastVerifiedAt": new Date(),
+      // The model that was just verified, not the one requested. When no model
+      // is supplied these are the same, but pinning it here means the stored
+      // model can never drift from the one the key was tested against — which
+      // is the failure mode that passes at save and breaks in production.
+      "gemini.model": check.model,
     },
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );
@@ -125,8 +127,11 @@ router.delete("/", async (req, res) => {
  *
  * Authenticated like everything else. An open version of this would be a free
  * oracle for checking whether stolen Gemini keys are still live.
+ *
+ * Rate-limited per business: verifying is a live Google call, and the settings
+ * form is exactly where a double-click or impatient retry happens.
  */
-router.post("/test", async (req, res) => {
+router.post("/test", verifyRateLimit(), async (req, res) => {
   const provided =
     typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
   let apiKey = provided;

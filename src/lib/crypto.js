@@ -1,12 +1,35 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 
 const ALGORITHM = "aes-256-gcm";
 const IV_BYTES = 12;
 const CURRENT_KEY_VERSION = 1;
 
 const getKeys = () => {
-  const raw = process.env.AI_ENCRYPTION_KEY;
-  if (!raw) throw new Error("AI_ENCRYPTION_KEY is not set");
+  // AI_ENCRYPTION_KEY_FILE wins when set: a file path lets orchestrators
+  // (Docker secrets, K8s secret volumes) inject the key without it ever
+  // appearing in `env` output or a process table. Falls back to the plain
+  // variable for local dev.
+  const filePath = process.env.AI_ENCRYPTION_KEY_FILE;
+  let raw;
+  if (filePath) {
+    try {
+      raw = fs.readFileSync(filePath, "utf8").trim();
+    } catch {
+      throw new Error(
+        `AI_ENCRYPTION_KEY_FILE points at ${filePath} but it could not be read`,
+      );
+    }
+  } else {
+    raw = process.env.AI_ENCRYPTION_KEY;
+  }
+  if (!raw) {
+    throw new Error(
+      filePath
+        ? `AI_ENCRYPTION_KEY_FILE points at ${filePath} but it is empty`
+        : "AI_ENCRYPTION_KEY is not set",
+    );
+  }
 
   const key = Buffer.from(raw, "hex");
   if (key.length != 32) {

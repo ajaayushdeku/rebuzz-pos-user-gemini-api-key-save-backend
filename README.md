@@ -33,19 +33,20 @@ alone. Two options, and the choice needs agreeing with that team:
    hop, but it means holding another team's signing secret, and a rotation on
    their side silently breaks this service.
 
-Option 1 is the safer default until there's a reason to optimise. Whichever is
+Option 1 is the safer default until there's a reason to optimise, and it is
+what `requireBusiness` implements today (with an 8 s timeout). Whichever is
 chosen, **the business id must come from the verified token, never from the
 request body** — a client-supplied id would let any authenticated business read
 and spend another's key.
 
 ## Storage
 
-The key is encrypted at rest with AES-256-GCM under `ENCRYPTION_KEY`, not
+The key is encrypted at rest with AES-256-GCM under `AI_ENCRYPTION_KEY`, not
 stored as a plain string. The document keeps the ciphertext, its iv and auth
 tag, and a display mask (first and last few characters) so the settings screen
 has something to show without ever decrypting.
 
-`ENCRYPTION_KEY` is not recoverable: lose it and every stored key must be
+`AI_ENCRYPTION_KEY` is not recoverable: lose it and every stored key must be
 re-entered by its business.
 
 ## Endpoints
@@ -59,12 +60,17 @@ re-entered by its business.
 | `POST`   | `/api/settings/ai/test` | Verify a supplied key, or re-verify the stored one             |
 | `POST`   | `/api/ai-insights`      | `{ briefing, systemInstruction?, responseSchema? }` → insights |
 
-Save-time verification is currently **paused** — see the commented block in
-`routes/aiSettings.js`. A key is stored without asking Google whether it works,
-so `lastVerifiedAt` stays null rather than claiming a check that never
-happened. The consequence is that a typo'd key saves cleanly and only fails
-when a real feature runs. `POST /api/settings/ai/test` verifies on demand in
-the meantime.
+`POST /api/settings/ai` verifies the key with Google **before** storing it, so a
+typo'd or revoked key is rejected next to the field rather than saving cleanly
+and failing later inside a feature that then looks broken for some unrelated
+reason. The date that check passed is kept as `lastVerifiedAt`, and the record
+stores the exact model that was verified, so it can never be used against one
+it was not tested with.
+
+A `GEMINI_MODEL_UNAVAILABLE` failure also returns `available` — the Flash models
+this key can actually call — because a valid key without access to the default
+model is otherwise a dead end with nothing to try.
+`POST /api/settings/ai/test` re-runs the same check on demand.
 
 Failures are distinguished, because it is the business's own key and quota:
 invalid key, quota exceeded, and model error need three different messages.
@@ -82,17 +88,46 @@ itself. That keeps an insight card and the chart above it built from the same
 numbers, so the two cannot disagree. `requireBusiness` still stashes the
 caller's POS token for the day that decision is revisited.
 
+## Rate limiting
+
+Two per-business in-memory guards (`src/lib/rateLimit.js`), scoped by the
+verified `businessId`:
+
+| Route                   | Limit                        | Error code           |
+| ----------------------- | ---------------------------- | -------------------- |
+| `POST /api/ai-insights` | 20 generations / hour        | `INSIGHTS_RATE_LIMIT` |
+| `POST /api/settings/ai/test` | 10 verifications / minute | `VERIFY_RATE_LIMIT`  |
+
+Both answer **429** with a `Retry-After` header and the same wait in the JSON
+body (`retryAfter`, seconds). In-memory rather than Redis on purpose: the limit
+is a cost guard for a single small process, not a security boundary, and a
+restart failing open costs one extra window of calls. Replace the `Map` with a
+shared store if this ever runs as multiple replicas.
+
+## Logging
+
+- Every request: one line — method, path, status, duration. **Never the body**;
+  two routes carry a raw Gemini key in theirs, and body-logging middleware is
+  the most common way credentials reach a log file.
+- Insight calls: one structured JSON line per success
+  (`insights.generated`) and per failure (`insights.failed`) with business id,
+  model, token usage and duration, so per-tenant quota spend is visible without
+  asking Google. The briefing itself is never logged — it is merchant sales
+  data.
+- Errors: message only. Provider SDK error objects can echo the request back
+  with the key in it.
+
 ## Getting started
 
 ```bash
 cp .env.example .env
-# fill in MONGODB_URI and generate ENCRYPTION_KEY (command is in the file)
+# fill in MONGODB_URI and generate AI_ENCRYPTION_KEY (command is in the file)
 npm install
 npm run dev
 ```
 
 ## Status
 
-Working. Key storage, the settings routes and insight generation are
-implemented. Still to build: the briefing writer and the card that shows the
-result, both of which live in the frontend.
+Working end to end. Key storage, the settings routes, insight generation, rate
+limiting and structured logging are implemented here; the briefing writer and
+the insight cards live in the frontend (`rebuzz-pos/lib/ai-insights/`).
