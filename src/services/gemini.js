@@ -232,9 +232,32 @@ export async function suggestFlashModels(apiKey) {
  * retry would otherwise burn one of the 20 hourly slots for the same user
  * request), and the merchant's key never has to leave this process.
  */
+/**
+ * The ceiling on one insight reply, thinking included.
+ *
+ * The Flash models this service uses think before they answer, and the
+ * thinking is billed against the same `maxOutputTokens` as the answer. The
+ * cap was 2,048. On a normal day's briefing a measured call spent 1,314
+ * tokens thinking and 516 answering — 1,830 of the 2,048 — and thinking
+ * varies from call to call: the same briefing, capped a little lower, spent
+ * 1,439 thinking and was cut off 47 tokens into its answer. A cut-off answer
+ * is half a JSON document, which reached the merchant as "The AI answered in a
+ * format we couldn't read."
+ *
+ * A ceiling, not a charge: only the tokens actually generated are billed, so
+ * headroom costs nothing on a call that does not need it.
+ */
+const INSIGHTS_MAX_OUTPUT_TOKENS = 8_192;
+
 export async function generateInsights(
   apiKey,
-  { briefing, systemInstruction, responseSchema, model = DEFAULT_MODEL },
+  {
+    briefing,
+    systemInstruction,
+    responseSchema,
+    model = DEFAULT_MODEL,
+    maxOutputTokens = INSIGHTS_MAX_OUTPUT_TOKENS,
+  },
 ) {
   let lastError = "GEMINI_UNAVAILABLE";
 
@@ -245,6 +268,7 @@ export async function generateInsights(
         systemInstruction,
         responseSchema,
         model,
+        maxOutputTokens,
       });
     } catch (error) {
       const code = normalizeError(error);
@@ -271,7 +295,7 @@ export async function generateInsights(
 /** One Gemini call. Extracted so generateInsights can retry it. */
 async function generateOnce(
   apiKey,
-  { briefing, systemInstruction, responseSchema, model },
+  { briefing, systemInstruction, responseSchema, model, maxOutputTokens },
 ) {
   const ai = new GoogleGenAI({ apiKey });
 
@@ -289,11 +313,25 @@ async function generateOnce(
           }
         : {}),
       temperature: 0.2,
-      maxOutputTokens: 2048,
+      maxOutputTokens,
     },
   });
 
   const text = response.text ?? "";
+  const finishReason = response.candidates?.[0]?.finishReason;
+
+  // Reported as what it is. A reply that hit the token ceiling stops mid-word,
+  // and passed on it failed to parse downstream and was blamed on the model's
+  // "format" — which sent anyone investigating after the wrong thing. Not
+  // retried: the same briefing under the same ceiling runs out the same way.
+  if (finishReason === "MAX_TOKENS") {
+    console.warn(
+      `[gemini] insights truncated model=${model} maxOutputTokens=${maxOutputTokens} thinking=${
+        response.usageMetadata?.thoughtsTokenCount ?? "?"
+      } answer=${response.usageMetadata?.candidatesTokenCount ?? "?"}`,
+    );
+    return { ok: false, error: "GEMINI_TRUNCATED" };
+  }
 
   if (!text.trim()) {
     // An empty body is usually a safety block or a truncated response, and
@@ -311,6 +349,9 @@ async function generateOnce(
       promptTokens: response.usageMetadata?.promptTokenCount ?? null,
       outputTokens: response.usageMetadata?.candidatesTokenCount ?? null,
       totalTokens: response.usageMetadata?.totalTokenCount ?? null,
+      // Counted apart from the answer. It is usually the larger share of an
+      // insight call's cost, and it is what ran the ceiling out before.
+      thinkingTokens: response.usageMetadata?.thoughtsTokenCount ?? null,
     },
   };
 }

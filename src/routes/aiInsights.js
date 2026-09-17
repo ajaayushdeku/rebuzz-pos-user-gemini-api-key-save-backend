@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import AISettings from "../models/AISettings.js";
+import AIInsightCache from "../models/AIInsightCache.js";
 import requireBusiness from "../middleware/requireBusiness.js";
 import { decrypt } from "../lib/crypto.js";
 import { generateInsights } from "../services/gemini.js";
@@ -38,6 +39,23 @@ const MAX_BRIEFING_CHARS = 16_000;
 
 /** A system instruction is a job description, not a second briefing. */
 const MAX_INSTRUCTION_CHARS = 4_000;
+
+/**
+ * What a cache key may look like, e.g. "sales-recommendations:v1:2026-09-17".
+ *
+ * Restricted to a plain alphabet so a key can never be an object or an
+ * operator by the time it reaches a MongoDB query.
+ */
+const CACHE_KEY_PATTERN = /^[A-Za-z0-9:._-]{1,120}$/;
+
+/**
+ * How long a cached answer is kept before MongoDB removes it.
+ *
+ * Housekeeping only. Keys that carry the date already stop matching at
+ * midnight; the extra two hours cover the gap between the business's day and
+ * the server's clock.
+ */
+const CACHE_TTL_MS = 26 * 60 * 60 * 1000;
 
 /**
  * One limiter for the route, created once. Built per request, every call would
@@ -81,6 +99,19 @@ async function prepareInsightRequest(req, res, next) {
     return res.status(400).json({ error: "INSTRUCTION_TOO_LONG" });
   }
 
+  const cacheKey = req.body?.cacheKey;
+  if (
+    cacheKey !== undefined &&
+    (typeof cacheKey !== "string" || !CACHE_KEY_PATTERN.test(cacheKey))
+  ) {
+    return res.status(400).json({ error: "INVALID_CACHE_KEY" });
+  }
+  // A cache key only means something with a schema: only parsed answers are
+  // stored, so without one there would be nothing to serve back.
+  if (cacheKey && !responseSchema) {
+    return res.status(400).json({ error: "CACHE_NEEDS_SCHEMA" });
+  }
+
   const settings = await AISettings.findOne({ businessId: req.businessId });
 
   /**
@@ -98,16 +129,108 @@ async function prepareInsightRequest(req, res, next) {
     return res.status(424).json({ error: "AI_DISABLED" });
   }
 
-  req.insight = { briefing, systemInstruction, responseSchema, settings };
+  req.insight = {
+    briefing,
+    systemInstruction,
+    responseSchema,
+    settings,
+    cacheKey: cacheKey ?? null,
+    // Strictly `true`: a stray "false" string must not skip the cache and
+    // spend a call nobody asked for.
+    refresh: req.body?.refresh === true,
+  };
   next();
 }
 
-router.post("/", prepareInsightRequest, quotaGuard, async (req, res) => {
+/**
+ * Answer from the cache when the same question was already paid for.
+ *
+ * Runs after the checks above and before the rate limit. After the checks, so
+ * a merchant who removed their key or switched AI off stops seeing answers
+ * straight away rather than when the cache runs out. Before the rate limit,
+ * because a cached answer costs nothing and must not use up the hour.
+ *
+ * Any trouble reading the cache falls through to a normal call. The cache
+ * saves money; it must never be the reason an insight fails.
+ */
+async function serveCached(req, res, next) {
+  const { cacheKey, refresh, settings } = req.insight;
+  if (!cacheKey || refresh) return next();
+
+  try {
+    const hit = await AIInsightCache.findOne({
+      businessId: req.businessId,
+      cacheKey,
+      expiresAt: { $gt: new Date() },
+    }).lean();
+
+    // An answer from before a model change is treated as a miss.
+    if (!hit || hit.settingsModel !== (settings.gemini.model || null)) {
+      return next();
+    }
+
+    console.info(
+      JSON.stringify({
+        level: "info",
+        event: "insights.cache_hit",
+        businessId: req.businessId,
+        cacheKey,
+      }),
+    );
+
+    return res.json({
+      data: {
+        insights: hit.insights,
+        model: hit.model,
+        // Nothing was spent on this request.
+        usage: null,
+        generatedAt: hit.generatedAt.toISOString(),
+        cached: true,
+      },
+    });
+  } catch (error) {
+    console.warn(
+      `[insights] cache read failed for business=${req.businessId}: ${error?.message}`,
+    );
+    return next();
+  }
+}
+
+/** Keep a fresh answer under its key. Failures are logged, never thrown. */
+async function storeInCache(req, { insights, model, generatedAt }) {
+  const { cacheKey, settings } = req.insight;
+  if (!cacheKey) return;
+
+  try {
+    await AIInsightCache.findOneAndUpdate(
+      { businessId: req.businessId, cacheKey },
+      {
+        insights,
+        model,
+        settingsModel: settings.gemini.model || null,
+        generatedAt,
+        expiresAt: new Date(generatedAt.getTime() + CACHE_TTL_MS),
+      },
+      { upsert: true },
+    );
+  } catch (error) {
+    console.warn(
+      `[insights] cache write failed for business=${req.businessId}: ${error?.message}`,
+    );
+  }
+}
+
+/**
+ * In order: refuse what costs nothing, answer from the cache, then count
+ * against the hour. Only a request that gets past all three reaches Google.
+ */
+const beforeGenerating = [prepareInsightRequest, serveCached, quotaGuard];
+
+router.post("/", beforeGenerating, async (req, res) => {
   // Paired with the success log at the end: without a start time, a slow
   // success and a stalled call are indistinguishable from the dashboard.
   const startedAt = Date.now();
-  const { briefing, systemInstruction, responseSchema, settings } =
-    req.insight;
+  const { briefing, systemInstruction, responseSchema, settings } = req.insight;
 
   let apiKey;
   try {
@@ -186,12 +309,22 @@ router.post("/", prepareInsightRequest, quotaGuard, async (req, res) => {
     }
   }
 
+  const generatedAt = new Date();
+
+  // Stored before answering, not after. A reload straight after this reply
+  // then finds the answer waiting, instead of racing the write and paying for
+  // a second call.
+  if (responseSchema) {
+    await storeInCache(req, { insights, model: result.model, generatedAt });
+  }
+
   res.json({
     data: {
       insights,
       model: result.model,
       usage: result.usage,
-      generatedAt: new Date().toISOString(),
+      generatedAt: generatedAt.toISOString(),
+      cached: false,
     },
   });
 

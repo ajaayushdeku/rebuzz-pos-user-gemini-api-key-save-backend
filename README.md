@@ -58,7 +58,7 @@ re-entered by its business.
 | `PATCH`  | `/api/settings/ai`      | Toggle `enabled` or change the model. Cannot set the key       |
 | `DELETE` | `/api/settings/ai`      | Forget this business's key                                     |
 | `POST`   | `/api/settings/ai/test` | Verify a supplied key, or re-verify the stored one             |
-| `POST`   | `/api/ai-insights`      | `{ briefing, systemInstruction?, responseSchema? }` → insights |
+| `POST`   | `/api/ai-insights`      | `{ briefing, systemInstruction?, responseSchema?, cacheKey?, refresh? }` → insights |
 
 `POST /api/settings/ai` verifies the key with Google **before** storing it, so a
 typo'd or revoked key is rejected next to the field rather than saving cleanly
@@ -88,6 +88,26 @@ itself. That keeps an insight card and the chart above it built from the same
 numbers, so the two cannot disagree. `requireBusiness` still stashes the
 caller's POS token for the day that decision is revisited.
 
+## Caching answers
+
+`POST /api/ai-insights` can keep an answer so the same question is not paid for
+twice. The caller names it with `cacheKey` (letters, digits and `:._-`, up to
+120 characters), for example `sales-recommendations:v1:2026-09-17`:
+
+- A later request with the same key gets the stored answer back with
+  `cached: true` and `usage: null`. Google is not called, and the request does
+  not count against the rate limit.
+- `refresh: true` skips the stored answer, generates a new one and replaces it.
+- Freshness is up to the key. A key that includes the date stops matching the
+  next day. Stored answers are deleted by MongoDB after 26 hours
+  (`AIInsightCache`, TTL index), which is housekeeping only.
+- An answer is not served if the business has removed its key, switched AI
+  off, or changed its model since the answer was written.
+- A `cacheKey` requires a `responseSchema`, because only parsed answers are
+  stored. A cache read or write that fails falls back to a normal call.
+
+Without `cacheKey` the route behaves exactly as before.
+
 ## Rate limiting
 
 Two per-business in-memory guards (`src/lib/rateLimit.js`), scoped by the
@@ -102,8 +122,8 @@ Each budget is one limiter instance shared across its routes, so the settings
 routes draw on a single allowance rather than ten a minute each.
 
 Only requests that are about to reach Google count. The insights route checks
-the briefing, the stored key and the on/off switch first, and a refusal there
-costs nothing. Counting refusals would lock a merchant out: the overview page
+the briefing, the stored key and the on/off switch first, then the cache, and a
+refusal or a cached answer costs nothing. Counting refusals would lock a merchant out: the overview page
 asks for insights on every visit, so twenty visits without a key used to leave
 them rate-limited for up to an hour after saving one.
 
@@ -119,7 +139,8 @@ shared store if this ever runs as multiple replicas.
   two routes carry a raw Gemini key in theirs, and body-logging middleware is
   the most common way credentials reach a log file.
 - Insight calls: one structured JSON line per success
-  (`insights.generated`) and per failure (`insights.failed`) with business id,
+  (`insights.generated`), per failure (`insights.failed`) and per cached answer
+  (`insights.cache_hit`) with business id,
   model, token usage and duration, so per-tenant quota spend is visible without
   asking Google. The briefing itself is never logged — it is merchant sales
   data.
