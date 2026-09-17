@@ -93,10 +93,19 @@ caller's POS token for the day that decision is revisited.
 Two per-business in-memory guards (`src/lib/rateLimit.js`), scoped by the
 verified `businessId`:
 
-| Route                   | Limit                        | Error code           |
-| ----------------------- | ---------------------------- | -------------------- |
-| `POST /api/ai-insights` | 20 generations / hour        | `INSIGHTS_RATE_LIMIT` |
-| `POST /api/settings/ai/test` | 10 verifications / minute | `VERIFY_RATE_LIMIT`  |
+| Budget     | Routes that spend it                                                              | Limit             | Error code            |
+| ---------- | --------------------------------------------------------------------------------- | ----------------- | --------------------- |
+| Insights   | `POST /api/ai-insights`                                                           | 20 / hour         | `INSIGHTS_RATE_LIMIT` |
+| Google calls from settings | `POST /api/settings/ai`, `PATCH` when changing the model, `POST /test`, `GET /models` | 10 / minute, shared | `VERIFY_RATE_LIMIT`   |
+
+Each budget is one limiter instance shared across its routes, so the settings
+routes draw on a single allowance rather than ten a minute each.
+
+Only requests that are about to reach Google count. The insights route checks
+the briefing, the stored key and the on/off switch first, and a refusal there
+costs nothing. Counting refusals would lock a merchant out: the overview page
+asks for insights on every visit, so twenty visits without a key used to leave
+them rate-limited for up to an hour after saving one.
 
 Both answer **429** with a `Retry-After` header and the same wait in the JSON
 body (`retryAfter`, seconds). In-memory rather than Redis on purpose: the limit

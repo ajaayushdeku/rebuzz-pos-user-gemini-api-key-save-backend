@@ -26,10 +26,6 @@ const router = Router();
 
 router.use(requireBusiness);
 
-// Quota guard: this is the route that spends the merchant's Gemini budget,
-// so the burst limit applies before any validation or decryption work.
-router.use(insightsRateLimit());
-
 /**
  * Roughly four thousand tokens of input.
  *
@@ -43,11 +39,27 @@ const MAX_BRIEFING_CHARS = 16_000;
 /** A system instruction is a job description, not a second briefing. */
 const MAX_INSTRUCTION_CHARS = 4_000;
 
-router.post("/", async (req, res) => {
-  // Paired with the success log at the end: without a start time, a slow
-  // success and a stalled call are indistinguishable from the dashboard.
-  const startedAt = Date.now();
+/**
+ * One limiter for the route, created once. Built per request, every call would
+ * get a fresh empty bucket and nothing would ever be limited.
+ */
+const quotaGuard = insightsRateLimit();
 
+/**
+ * Everything that can refuse a request without spending anything.
+ *
+ * Runs before the rate limit, not after it. The limit exists to bound Gemini
+ * spend, so it should only count requests that are about to reach Gemini. When
+ * it ran first, every refusal here was charged against the hour: the overview
+ * page asks for insights on each visit, so a merchant without a key who opened
+ * it twenty times — each one a 424 that cost nothing — then saved a key and
+ * was still told "too many requests" for up to an hour.
+ *
+ * The decrypted key is deliberately not stashed on the request. Only the
+ * stored record travels onward, and decryption happens in the handler that
+ * uses it, so the plaintext never sits on an object other middleware can see.
+ */
+async function prepareInsightRequest(req, res, next) {
   const briefing =
     typeof req.body?.briefing === "string" ? req.body.briefing.trim() : "";
   const systemInstruction =
@@ -86,6 +98,17 @@ router.post("/", async (req, res) => {
     return res.status(424).json({ error: "AI_DISABLED" });
   }
 
+  req.insight = { briefing, systemInstruction, responseSchema, settings };
+  next();
+}
+
+router.post("/", prepareInsightRequest, quotaGuard, async (req, res) => {
+  // Paired with the success log at the end: without a start time, a slow
+  // success and a stalled call are indistinguishable from the dashboard.
+  const startedAt = Date.now();
+  const { briefing, systemInstruction, responseSchema, settings } =
+    req.insight;
+
   let apiKey;
   try {
     apiKey = decrypt(settings.gemini.apiKey);
@@ -114,8 +137,8 @@ router.post("/", async (req, res) => {
      * existing error messages cover this route for free.
      */
     // One structured line per failed insight call: which tenant, which model,
-    // which failure, what it cost, and how long it took. The briefing is never
-    // logged — it is merchant sales data, and logs are the wrong place for it.
+    // which failure, and how long it took. The briefing is never logged — it
+    // is merchant sales data, and logs are the wrong place for it.
     console.warn(
       JSON.stringify({
         level: "warn",
@@ -143,6 +166,19 @@ router.post("/", async (req, res) => {
     try {
       insights = JSON.parse(result.text);
     } catch {
+      // Logged like any other failure. The call succeeded and was paid for,
+      // so a malformed answer is spend with nothing to show — the one failure
+      // most worth seeing in the logs, and it was the only silent one.
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          event: "insights.malformed",
+          businessId: req.businessId,
+          model: result.model,
+          usage: result.usage,
+          durationMs: Date.now() - startedAt,
+        }),
+      );
       return res.status(502).json({
         error: "GEMINI_MALFORMED_RESPONSE",
         raw: result.text.slice(0, 500),

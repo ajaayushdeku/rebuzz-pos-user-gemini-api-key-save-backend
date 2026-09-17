@@ -3,16 +3,40 @@ import { Router } from "express";
 import AISettings from "../models/AISettings.js";
 import requireBusiness from "../middleware/requireBusiness.js";
 import { decrypt, encrypt, maskKey } from "../lib/crypto.js";
-// verifyGeminiKey backs both the save-time check in POST / and POST /test.
-// suggestFlashModels is reachable only through the save-time check, which is
-// the one place a model can be found to be unavailable before it is stored.
-import { suggestFlashModels, verifyGeminiKey } from "../services/gemini.js";
+// verifyGeminiKey backs every check before a key or model is stored — save,
+// a model change through PATCH — and POST /test. suggestFlashModels runs when
+// one of those checks finds the model unavailable, so the refusal can name
+// what the key can use instead.
+import {
+  listAvailableModels,
+  suggestFlashModels,
+  verifyGeminiKey,
+} from "../services/gemini.js";
 import { verifyRateLimit } from "../lib/rateLimit.js";
 
 const router = Router();
 
 // Every route below is scoped to one business. No exceptions.
 router.use(requireBusiness);
+
+/**
+ * One budget for every live call these routes make to Google.
+ *
+ * Created once and shared. Calling `verifyRateLimit()` separately on each route
+ * built an independent bucket per route, so a business had ten checks a minute
+ * on /test, another ten on /models, and no limit at all on save — which is the
+ * button a double-click actually lands on.
+ */
+const verifyGuard = verifyRateLimit();
+
+/**
+ * PATCH only reaches Google when it changes the model; toggling `enabled` is a
+ * database write and should not spend the budget.
+ */
+const guardModelChange = (req, res, next) =>
+  typeof req.body?.model === "string" && req.body.model.trim()
+    ? verifyGuard(req, res, next)
+    : next();
 
 /** Safe metadata only — never the key, never the ciphertext. */
 router.get("/", async (req, res) => {
@@ -29,7 +53,7 @@ router.get("/", async (req, res) => {
 });
 
 /** Set or replace the key. */
-router.post("/", async (req, res) => {
+router.post("/", verifyGuard, async (req, res) => {
   const apiKey =
     typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
   const model =
@@ -78,15 +102,51 @@ router.post("/", async (req, res) => {
   res.json({ data: settings.toSafeJSON() });
 });
 
-/** Toggle `enabled` or change the model. Deliberately cannot set the key. */
-router.patch("/", async (req, res) => {
+/**
+ * Toggle `enabled` or change the model. Deliberately cannot set the key.
+ *
+ * A model change is checked against the stored key before it is written. Save
+ * already refuses to store a model the key cannot call — it pins "the model
+ * that was just verified" for exactly that reason — and without the same check
+ * here, PATCH was a side door around it: any string was accepted, reported as
+ * "Model updated", and left `lastVerifiedAt` still claiming a check the new
+ * model never had. The failure then surfaced later, inside an insight card, as
+ * an error about a model the merchant had just been told was fine.
+ */
+router.patch("/", guardModelChange, async (req, res) => {
   const update = {};
+  const model =
+    typeof req.body?.model === "string" ? req.body.model.trim() : "";
 
   if (typeof req.body?.enabled === "boolean") {
     update["gemini.enabled"] = req.body.enabled;
   }
-  if (typeof req.body?.model === "string" && req.body.model.trim()) {
-    update["gemini.model"] = req.body.model.trim();
+
+  if (model) {
+    const current = await AISettings.findOne({ businessId: req.businessId });
+    if (!current?.gemini?.apiKey) {
+      return res.status(404).json({ error: "NOT_CONFIGURED" });
+    }
+
+    let apiKey;
+    try {
+      apiKey = decrypt(current.gemini.apiKey);
+    } catch {
+      return res.status(500).json({ error: "KEY_UNREADABLE" });
+    }
+
+    const check = await verifyGeminiKey(apiKey, model);
+    if (!check.ok) {
+      if (check.error === "GEMINI_MODEL_UNAVAILABLE") {
+        const available = await suggestFlashModels(apiKey);
+        return res.status(400).json({ error: check.error, available });
+      }
+      return res.status(400).json({ error: check.error });
+    }
+
+    update["gemini.model"] = check.model;
+    // The check above just happened, against this model and this key.
+    update["gemini.lastVerifiedAt"] = new Date();
   }
 
   if (Object.keys(update).length === 0) {
@@ -131,7 +191,7 @@ router.delete("/", async (req, res) => {
  * Rate-limited per business: verifying is a live Google call, and the settings
  * form is exactly where a double-click or impatient retry happens.
  */
-router.post("/test", verifyRateLimit(), async (req, res) => {
+router.post("/test", verifyGuard, async (req, res) => {
   const provided =
     typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
   let apiKey = provided;
@@ -141,7 +201,13 @@ router.post("/test", verifyRateLimit(), async (req, res) => {
     if (!settings?.gemini?.apiKey) {
       return res.status(404).json({ error: "NOT_CONFIGURED" });
     }
-    apiKey = decrypt(settings.gemini.apiKey);
+    try {
+      apiKey = decrypt(settings.gemini.apiKey);
+    } catch {
+      // Uncaught, this fell through to the generic 500 handler and the form
+      // could only say "something went wrong".
+      return res.status(500).json({ error: "KEY_UNREADABLE" });
+    }
   }
 
   const model =
@@ -155,6 +221,45 @@ router.post("/test", verifyRateLimit(), async (req, res) => {
   }
 
   res.json({ data: { ok: true, model: check.model } });
+});
+
+/**
+ * The models the stored key can actually call.
+ *
+ * Only offered for a saved key: the list is fetched from Google using the
+ * stored credential, so without one there is nothing to ask about — and that
+ * 404 is what gates the model selector in the settings UI. Rate-limited like
+ * /test, because listing models is a live Google call and the settings form
+ * is exactly where a retry loop happens.
+ */
+router.get("/models", verifyGuard, async (req, res) => {
+  const settings = await AISettings.findOne({ businessId: req.businessId });
+  if (!settings?.gemini?.apiKey) {
+    return res.status(404).json({ error: "NOT_CONFIGURED" });
+  }
+
+  let apiKey;
+  try {
+    apiKey = decrypt(settings.gemini.apiKey);
+  } catch {
+    // The ciphertext no longer verifies — the record was altered or the
+    // encryption key rotated. KEY_UNREADABLE, the same code the insights route
+    // uses: GEMINI_KEY_INVALID told the merchant Google had rejected a key that
+    // Google never saw, and sent them to check a key that was fine.
+    return res.status(500).json({ error: "KEY_UNREADABLE" });
+  }
+
+  const list = await listAvailableModels(apiKey);
+  if (!list.ok) {
+    return res.status(400).json({ error: list.error });
+  }
+
+  res.json({
+    data: {
+      models: list.models,
+      current: settings.gemini.model ?? null,
+    },
+  });
 });
 
 export default router;

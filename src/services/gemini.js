@@ -85,6 +85,115 @@ export async function listGeminiModels(apiKey) {
 }
 
 /**
+ * Words that rule a model out of the selector, whatever else its name says.
+ *
+ * One list, shared. It used to be written out twice — once here and once in
+ * `suggestFlashModels` — and two copies of a list that has to follow Google's
+ * model line are two copies that drift.
+ */
+const EXCLUDED_MODEL_WORDS = [
+  "image",
+  "tts",
+  "live",
+  "audio",
+  "omni",
+  "transcribe",
+  "embedding",
+  // Closed to new users; Google's own 404 points at gemini-3.6-flash.
+  "2.5-flash",
+  "2.0-flash",
+];
+
+/**
+ * Whether a model name is one worth offering.
+ *
+ * Flash only: the free tier stopped covering Pro models in 2026, so offering
+ * one would send the user into a billing wall. Previews and `-latest` aliases
+ * are out too — both move or vanish without notice, a poor thing to hand
+ * someone as a setting they will store and forget.
+ */
+function isOfferableFlashModel(name) {
+  return (
+    name.includes("flash") &&
+    !EXCLUDED_MODEL_WORDS.some((word) => name.includes(word)) &&
+    !name.includes("preview") &&
+    !name.endsWith("-latest")
+  );
+}
+
+/** Google caps a page at a thousand. Asking for the cap avoids most paging. */
+const MODELS_PAGE_SIZE = 1000;
+
+/**
+ * The models this key may actually use, straight from Google's models endpoint.
+ *
+ * GET https://generativelanguage.googleapis.com/v1beta/models with the key in
+ * the x-goog-api-key header. The header rather than a query parameter because
+ * a key in a URL lands in access logs, proxies and browser history — the
+ * header keeps the credential out of everything that records the request line.
+ *
+ * Every page is read. The endpoint returns fifty models per page unless told
+ * otherwise, and a key's list runs past that, so reading only the first page
+ * silently dropped whichever models sorted onto the second — which, for an
+ * alphabetical list, can be the newest ones.
+ *
+ * Listed does not mean usable. A key's model list includes entries it cannot
+ * call — gemini-2.5-flash is listed for every key and 404s for new ones —
+ * and many "flash" entries are audio, image or realtime variants that
+ * generateContent cannot drive at all.
+ */
+export async function listAvailableModels(apiKey) {
+  try {
+    const entries = [];
+    let pageToken = "";
+
+    do {
+      const url = new URL(
+        "https://generativelanguage.googleapis.com/v1beta/models",
+      );
+      url.searchParams.set("pageSize", String(MODELS_PAGE_SIZE));
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+      const res = await fetch(url, {
+        headers: { "x-goog-api-key": apiKey },
+        // Without a timeout a slow Google holds the settings request open
+        // indefinitely, and the form's spinner with it.
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (!res.ok) {
+        // Mirror a provider failure onto the same codes everything else uses.
+        const code = normalizeError({ status: res.status });
+        console.warn(
+          `[gemini] list models failed code=${code} status=${res.status}`,
+        );
+        return { ok: false, error: code };
+      }
+
+      const json = await res.json().catch(() => ({}));
+      if (Array.isArray(json?.models)) entries.push(...json.models);
+      pageToken =
+        typeof json?.nextPageToken === "string" ? json.nextPageToken : "";
+    } while (pageToken);
+
+    const models = entries
+      .filter((entry) =>
+        // Only what generateContent can drive: the selector feeds insight
+        // calls, and offering an embedding model there would 400 on first use.
+        entry?.supportedGenerationMethods?.includes("generateContent"),
+      )
+      .map((entry) => String(entry?.name ?? "").replace(/^models\//, ""))
+      .filter((name) => name && isOfferableFlashModel(name))
+      .sort()
+      .reverse();
+
+    return { ok: true, models };
+  } catch (error) {
+    return { ok: false, error: normalizeError(error) };
+  }
+}
+
+/**
  * Flash models this key can use, newest first.
  *
  * Called only when a model has already 404'd, to turn a dead end into a
@@ -92,46 +201,15 @@ export async function listGeminiModels(apiKey) {
  * hardcoded allowlist: the model line moves, and a static list would start
  * rejecting names that are perfectly valid — the same trap as validating an
  * API key by its prefix.
+ *
+ * Built on `listAvailableModels` so a suggestion and the selector can never
+ * disagree. It used to filter names only, which meant it could suggest a model
+ * that generateContent cannot drive — the very failure it exists to recover
+ * from.
  */
 export async function suggestFlashModels(apiKey) {
-  const list = await listGeminiModels(apiKey);
-  if (!list.ok) return [];
-
-  // Listed does not mean usable. A key's model list includes entries it cannot
-  // call — gemini-2.5-flash is listed for every key and 404s for new ones —
-  // and many "flash" entries are audio, image or realtime variants that
-  // generateContent cannot drive at all.
-  const EXCLUDED = [
-    "image",
-    "tts",
-    "live",
-    "audio",
-    "omni",
-    "transcribe",
-    "embedding",
-    // Closed to new users; Google's own 404 points at gemini-3.6-flash.
-    "2.5-flash",
-    "2.0-flash",
-  ];
-
-  return (
-    list.models
-      .map((name) => name.replace(/^models\//, ""))
-      // Flash only: the free tier stopped covering Pro models in 2026, so
-      // offering one would send the user into a billing wall.
-      .filter(
-        (name) =>
-          name.includes("flash") &&
-          !EXCLUDED.some((word) => name.includes(word)) &&
-          // Previews are withdrawn without notice — a poor thing to hand
-          // someone as a default they will store and forget.
-          !name.includes("preview") &&
-          !name.endsWith("-latest"),
-      )
-      .sort()
-      .reverse()
-      .slice(0, 5)
-  );
+  const list = await listAvailableModels(apiKey);
+  return list.ok ? list.models.slice(0, 5) : [];
 }
 
 /**
