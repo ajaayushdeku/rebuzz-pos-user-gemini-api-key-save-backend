@@ -50,7 +50,9 @@ function normalizeError(status, message = "") {
       ? "AI_QUOTA_EXCEEDED"
       : "AI_RATE_LIMIT";
   }
-  if (status === 404) return "AI_MODEL_UNAVAILABLE";
+  // 410 is a model that used to exist: NVIDIA answers it for anything past
+  // its end of life, and "gone" is a model problem, not an outage.
+  if (status === 404 || status === 410) return "AI_MODEL_UNAVAILABLE";
   if (status === 400) {
     // A 400 is usually the schema this service sent, not the merchant's key —
     // telling them their key is invalid would send them to fix the wrong thing.

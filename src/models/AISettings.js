@@ -52,6 +52,7 @@ const aiSettingsSchema = new mongoose.Schema(
     groq: providerCredentialsSchema("openai/gpt-oss-20b"),
     cerebras: providerCredentialsSchema("gpt-oss-120b"),
     mistral: providerCredentialsSchema("mistral-small-latest"),
+    nvidia: providerCredentialsSchema("openai/gpt-oss-20b"),
   },
   { timestamps: true },
 );
@@ -90,6 +91,7 @@ aiSettingsSchema.set("toJSON", {
     if (ret.groq) delete ret.groq.apiKey;
     if (ret.cerebras) delete ret.cerebras.apiKey;
     if (ret.mistral) delete ret.mistral.apiKey;
+    if (ret.nvidia) delete ret.nvidia.apiKey;
     return ret;
   },
 });

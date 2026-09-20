@@ -27,6 +27,7 @@ import * as openrouter from "./openrouter.js";
 import * as groq from "./groq.js";
 import * as cerebras from "./cerebras.js";
 import * as mistral from "./mistral.js";
+import * as nvidia from "./nvidia.js";
 
 /**
  * The Gemini service still speaks its own `GEMINI_*` codes.
@@ -105,6 +106,16 @@ export const PROVIDERS = {
     listModels: mistral.listModels,
     suggestModels: mistral.suggestModels,
     generateInsights: mistral.generateInsights,
+  },
+  nvidia: {
+    id: "nvidia",
+    label: "NVIDIA NIM",
+    defaultModel: nvidia.DEFAULT_MODEL,
+    keysUrl: "https://build.nvidia.com",
+    verifyKey: nvidia.verifyKey,
+    listModels: nvidia.listModels,
+    suggestModels: nvidia.suggestModels,
+    generateInsights: nvidia.generateInsights,
   },
 };
 

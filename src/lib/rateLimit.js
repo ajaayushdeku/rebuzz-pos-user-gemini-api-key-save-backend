@@ -67,32 +67,6 @@ export function rateLimit({
     next();
   };
 
-  /**
-   * What the bucket looks like, without touching it.
-   *
-   * For showing a merchant how much of their hour is left. Deliberately does
-   * not prune or record anything: asking how many calls remain must never be
-   * one of the calls, and a meter that spent a slot to draw itself would be
-   * worse than no meter.
-   *
-   * The window rolls, so there is no single reset time — slots come back one
-   * at a time as they age out. `nextSlotAt` is when the oldest does, and null
-   * when nothing is spent.
-   */
-  middleware.peek = (key) => {
-    const now = Date.now();
-    const recent = (buckets.get(key) ?? []).filter((t) => now - t < windowMs);
-    const oldest = recent[0];
-
-    return {
-      limit: max,
-      used: recent.length,
-      remaining: Math.max(0, max - recent.length),
-      windowMs,
-      nextSlotAt: oldest ? new Date(oldest + windowMs).toISOString() : null,
-    };
-  };
-
   return middleware;
 }
 

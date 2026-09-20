@@ -318,61 +318,6 @@ async function storeInCache(req, { insights, model, generatedAt }) {
 }
 
 /**
- * What is left of this business's hour, and what has already been written
- * today. For the meter on the insights page.
- *
- * Costs nothing and spends nothing: the hour is read from the limiter without
- * charging it, and the day's sections come from the cache this service
- * already keeps. Deliberately says nothing about the provider's own quota —
- * Gemini publishes no such number, and inventing one would be worse than
- * showing none.
- *
- * `date` is the business's own day (the caller knows its timezone; this
- * service does not), and it is only ever matched against a cache key, never
- * stored, so an odd value returns an empty day rather than an error.
- */
-router.get("/quota", async (req, res) => {
-  const date =
-    typeof req.query?.date === "string" && DATE_PATTERN.test(req.query.date)
-      ? req.query.date
-      : new Date().toISOString().slice(0, 10);
-
-  let sections = [];
-  try {
-    const rows = await AIInsightCache.find({
-      businessId: req.businessId,
-      // The key is "section:version:date"; anchored on the date it ends with.
-      cacheKey: { $regex: `:${date}$` },
-      expiresAt: { $gt: new Date() },
-    })
-      .select("cacheKey model generatedAt")
-      .lean();
-
-    sections = rows.map((row) => ({
-      // The section's own name, without the prompt version or the date.
-      section: String(row.cacheKey).split(":")[0],
-      model: row.model ?? null,
-      generatedAt: row.generatedAt?.toISOString() ?? null,
-    }));
-  } catch (error) {
-    // A meter is not worth failing a page over.
-    console.warn(
-      `[insights] quota read failed for business=${req.businessId}: ${error?.message}`,
-    );
-  }
-
-  res.json({
-    data: {
-      hour: quotaGuard.peek(req.businessId),
-      today: { date, sections },
-    },
-  });
-});
-
-/** YYYY-MM-DD, and nothing else, before it reaches a query. */
-const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-/**
  * In order: refuse what costs nothing, answer from the cache, then count
  * against the hour. Only a request that gets past all three reaches Google.
  */
