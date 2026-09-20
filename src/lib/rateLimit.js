@@ -16,13 +16,28 @@
  */
 
 /**
- * @param {{ windowMs?: number, max?: number, error?: string }} options
+ * @param {{
+ *   windowMs?: number,
+ *   max?: number,
+ *   error?: string,
+ *   onLimit?: (req: object, res: object, retryAfterSec: number) => Promise<boolean>
+ * }} options
+ *
+ * `onLimit` is offered the refused request before the 429 is written, and
+ * answers whether it handled it. The insights route uses it to serve the last
+ * answer it has rather than an error — a card that is an hour old is worth
+ * more to a merchant than an empty panel.
  */
-export function rateLimit({ windowMs = 60_000, max = 10, error = "RATE_LIMITED" } = {}) {
+export function rateLimit({
+  windowMs = 60_000,
+  max = 10,
+  error = "RATE_LIMITED",
+  onLimit,
+} = {}) {
   /** Key -> timestamps (ms) of recent allowed requests. */
   const buckets = new Map();
 
-  return (req, res, next) => {
+  const middleware = async (req, res, next) => {
     // Scoped by business when auth has run, otherwise by IP — so one tenant's
     // burst never spends another tenant's budget, and unauthenticated callers
     // still share nothing wider than their own address.
@@ -36,6 +51,11 @@ export function rateLimit({ windowMs = 60_000, max = 10, error = "RATE_LIMITED" 
     if (recent.length >= max) {
       const oldest = recent[0];
       const retryAfterSec = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+
+      // A refusal costs nothing upstream, so the bucket is not charged for it
+      // either — and whoever wants to answer it differently gets first refusal.
+      if (onLimit && (await onLimit(req, res, retryAfterSec))) return;
+
       res.setHeader("Retry-After", String(retryAfterSec));
       // Both header and body: header for HTTP clients, body for the frontend
       // client, which reads the JSON error (see AiInsightsApiError.retryAfter).
@@ -46,6 +66,34 @@ export function rateLimit({ windowMs = 60_000, max = 10, error = "RATE_LIMITED" 
     buckets.set(key, recent);
     next();
   };
+
+  /**
+   * What the bucket looks like, without touching it.
+   *
+   * For showing a merchant how much of their hour is left. Deliberately does
+   * not prune or record anything: asking how many calls remain must never be
+   * one of the calls, and a meter that spent a slot to draw itself would be
+   * worse than no meter.
+   *
+   * The window rolls, so there is no single reset time — slots come back one
+   * at a time as they age out. `nextSlotAt` is when the oldest does, and null
+   * when nothing is spent.
+   */
+  middleware.peek = (key) => {
+    const now = Date.now();
+    const recent = (buckets.get(key) ?? []).filter((t) => now - t < windowMs);
+    const oldest = recent[0];
+
+    return {
+      limit: max,
+      used: recent.length,
+      remaining: Math.max(0, max - recent.length),
+      windowMs,
+      nextSlotAt: oldest ? new Date(oldest + windowMs).toISOString() : null,
+    };
+  };
+
+  return middleware;
 }
 
 /**
@@ -54,8 +102,13 @@ export function rateLimit({ windowMs = 60_000, max = 10, error = "RATE_LIMITED" 
  * (even one refresh every 3 minutes fits) while still capping a runaway loop
  * at 20 calls before it must wait.
  */
-export const insightsRateLimit = () =>
-  rateLimit({ windowMs: 60 * 60 * 1000, max: 20, error: "INSIGHTS_RATE_LIMIT" });
+export const insightsRateLimit = (onLimit) =>
+  rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 20,
+    error: "INSIGHTS_RATE_LIMIT",
+    onLimit,
+  });
 
 /**
  * Guard for the key-verification ping: at most 10 checks per business per

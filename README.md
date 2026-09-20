@@ -1,7 +1,7 @@
 # Rebuzz AI Service
 
-Stores each business's own Google Gemini API key, and makes model calls on
-their behalf so the key never reaches a browser.
+Stores each business's own AI provider key — Google Gemini or OpenRouter — and
+makes model calls on their behalf so the key never reaches a browser.
 
 Separate from the main POS API (`api.beta.rebuzzpos.com`) because that codebase
 belongs to another team. That separation is the source of this service's one
@@ -9,7 +9,7 @@ genuinely hard problem — see **Trust** below.
 
 ## Why the key never leaves this service
 
-A Gemini key bills the business that owns it. The frontend writes it once and
+A provider key bills the business that owns it. The frontend writes it once and
 can never read it back:
 
 - The settings form sends the key; nothing returns it.
@@ -18,7 +18,41 @@ can never read it back:
   would make a leaked session token enough to steal every business's
   credential.
 - Insight generation happens here: the frontend posts the briefing text, this
-  service decrypts the key, calls Gemini, and returns only the result.
+  service decrypts the key, calls the provider, and returns only the result.
+
+## Providers
+
+`src/services/providers.js` is the registry; each provider is one file beside
+it exposing the same four calls (`verifyKey`, `listModels`, `suggestModels`,
+`generateInsights`). Adding a third is a new file and an entry there — no route
+changes, because nothing else imports a provider directly.
+
+| Provider     | File                         | Default model       | Notes                                                       |
+| ------------ | ---------------------------- | ------------------- | ----------------------------------------------------------- |
+| `gemini`     | `src/services/gemini.js`     | `gemini-3.6-flash`  | Flash models only; the free tier stopped covering Pro       |
+| `openrouter` | `src/services/openrouter.js` | `openrouter/free`   | Free, text-only, structured-output models only              |
+| `groq`       | `src/services/groq.js`       | `openai/gpt-oss-20b` | Only the families Groq documents as honouring `json_schema` |
+
+OpenRouter and Groq are both the OpenAI-compatible shape, so they share
+`src/services/openaiCompatible.js` and are a short configuration each: base
+URL, key check, and which models to offer. A third provider of that shape is
+another such file.
+
+A business's chosen provider is `provider` on its settings document, and each
+provider's credentials live in their own block (`gemini`, `openrouter`), so
+switching does not throw away the key for the other one. A record written
+before there was a choice has no `provider` and reads as `gemini`.
+
+Errors use one provider-neutral vocabulary — `AI_KEY_INVALID`,
+`AI_QUOTA_EXCEEDED`, `AI_RATE_LIMIT`, `AI_MODEL_UNAVAILABLE`, `AI_UNAVAILABLE`,
+`AI_TRUNCATED`, `AI_EMPTY_RESPONSE`, `AI_MALFORMED_RESPONSE` — so the frontend
+has one set of messages whichever provider answered. (The Gemini service still
+speaks `GEMINI_*` internally; the registry translates.)
+
+OpenRouter's schema handling differs in one way worth knowing: its strict JSON
+mode rejects a schema unless every object bans extra properties and lists all
+its properties as required, so `toStrictSchema` adjusts the section schemas on
+the way out rather than each section carrying two versions.
 
 ## Trust: this service does not own auth
 
@@ -53,34 +87,35 @@ re-entered by its business.
 
 | Method   | Path                    | Does                                                          |
 | -------- | ----------------------- | ------------------------------------------------------------- |
-| `GET`    | `/api/settings/ai`      | Safe metadata only — configured, enabled, model, masked key    |
-| `POST`   | `/api/settings/ai`      | `{ apiKey, model? }` → encrypt and store                       |
-| `PATCH`  | `/api/settings/ai`      | Toggle `enabled` or change the model. Cannot set the key       |
-| `DELETE` | `/api/settings/ai`      | Forget this business's key                                     |
+| `GET`    | `/api/settings/ai`      | Safe metadata only — provider, configured, enabled, model, masked key, and the provider catalogue |
+| `POST`   | `/api/settings/ai`      | `{ apiKey, model?, provider? }` → encrypt and store. Saving also selects that provider |
+| `PATCH`  | `/api/settings/ai`      | Toggle `enabled`, change the model, or switch `provider` (to one that already has a key). Cannot set the key |
+| `DELETE` | `/api/settings/ai`      | Forget the key for the provider in use                         |
 | `POST`   | `/api/settings/ai/test` | Verify a supplied key, or re-verify the stored one             |
+| `GET`    | `/api/settings/ai/models` | The models the stored key can call; `?provider=` asks about another one it has a key for |
 | `POST`   | `/api/ai-insights`      | `{ briefing, systemInstruction?, responseSchema?, cacheKey?, refresh? }` → insights |
 
-`POST /api/settings/ai` verifies the key with Google **before** storing it, so a
+`POST /api/settings/ai` verifies the key with the provider **before** storing it, so a
 typo'd or revoked key is rejected next to the field rather than saving cleanly
 and failing later inside a feature that then looks broken for some unrelated
 reason. The date that check passed is kept as `lastVerifiedAt`, and the record
 stores the exact model that was verified, so it can never be used against one
 it was not tested with.
 
-A `GEMINI_MODEL_UNAVAILABLE` failure also returns `available` — the Flash models
-this key can actually call — because a valid key without access to the default
-model is otherwise a dead end with nothing to try.
+An `AI_MODEL_UNAVAILABLE` failure also returns `available` — the models this key
+can actually call — because a valid key without access to the default model is
+otherwise a dead end with nothing to try.
 `POST /api/settings/ai/test` re-runs the same check on demand.
 
 Failures are distinguished, because it is the business's own key and quota:
 invalid key, quota exceeded, and model error need three different messages.
 
 `POST /api/ai-insights` returns **424** both when no key is saved and when the
-business has switched Gemini off. Failed Dependency rather than an error,
+business has switched AI off. Failed Dependency rather than an error,
 because nothing is wrong with the request: a precondition the merchant controls
 is missing. The frontend can treat the status alone as "send them to settings"
 and use the code — `NOT_CONFIGURED` or `AI_DISABLED` — to pick the sentence.
-Upstream Gemini failures come back as **502** with the same error vocabulary
+Upstream provider failures come back as **502** with the same error vocabulary
 the settings route already uses.
 
 The caller supplies the briefing; this service does not fetch POS analytics

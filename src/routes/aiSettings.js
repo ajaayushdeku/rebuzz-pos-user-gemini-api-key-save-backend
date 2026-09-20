@@ -3,15 +3,17 @@ import { Router } from "express";
 import AISettings from "../models/AISettings.js";
 import requireBusiness from "../middleware/requireBusiness.js";
 import { decrypt, encrypt, maskKey } from "../lib/crypto.js";
-// verifyGeminiKey backs every check before a key or model is stored — save,
-// a model change through PATCH — and POST /test. suggestFlashModels runs when
-// one of those checks finds the model unavailable, so the refusal can name
-// what the key can use instead.
+// Providers are reached through the registry, never imported directly, so
+// these routes read the same whichever one a business uses. `verifyKey` backs
+// every check before a key or model is stored — save, a model change through
+// PATCH — and POST /test. `suggestModels` runs when one of those checks finds
+// the model unavailable, so the refusal can name what the key can use instead.
 import {
-  listAvailableModels,
-  suggestFlashModels,
-  verifyGeminiKey,
-} from "../services/gemini.js";
+  DEFAULT_PROVIDER,
+  getProvider,
+  isProviderId,
+  providerCatalogue,
+} from "../services/providers.js";
 import { verifyRateLimit } from "../lib/rateLimit.js";
 
 const router = Router();
@@ -34,9 +36,27 @@ const verifyGuard = verifyRateLimit();
  * database write and should not spend the budget.
  */
 const guardModelChange = (req, res, next) =>
-  typeof req.body?.model === "string" && req.body.model.trim()
+  (typeof req.body?.model === "string" && req.body.model.trim()) ||
+  typeof req.body?.provider === "string"
     ? verifyGuard(req, res, next)
     : next();
+
+/**
+ * Which provider a request is about.
+ *
+ * The body wins when it names a valid one — that is how a business switches —
+ * and the stored choice otherwise. An unknown name is ignored rather than
+ * refused: it can only come from a client newer than this service, and
+ * falling back to the configured provider is the harmless reading.
+ */
+const providerIdFor = (req, settings) =>
+  isProviderId(req.body?.provider)
+    ? req.body.provider
+    : (settings?.provider ?? DEFAULT_PROVIDER);
+
+/** The stored credentials for one provider, or null when there are none. */
+const credentialsFor = (settings, providerId) =>
+  settings?.[providerId]?.apiKey ? settings[providerId] : null;
 
 /** Safe metadata only — never the key, never the ciphertext. */
 router.get("/", async (req, res) => {
@@ -45,14 +65,33 @@ router.get("/", async (req, res) => {
   // Never having configured AI is a normal state, not a 404.
   if (!settings) {
     return res.json({
-      data: { configured: false, enabled: false, model: null, maskedKey: null },
+      data: {
+        provider: DEFAULT_PROVIDER,
+        configured: false,
+        enabled: false,
+        model: null,
+        maskedKey: null,
+        providers: providerCatalogue(),
+      },
     });
   }
 
-  res.json({ data: settings.toSafeJSON() });
+  res.json({
+    data: {
+      ...settings.toSafeJSON(),
+      // Sent with the settings so the form can offer the choices without a
+      // second request. Names and links only — never a credential.
+      providers: providerCatalogue(),
+      // Which other providers already hold a key, so switching can say
+      // whether it will need one.
+      configuredProviders: providerCatalogue()
+        .map((p) => p.id)
+        .filter((id) => Boolean(settings[id]?.apiKey)),
+    },
+  });
 });
 
-/** Set or replace the key. */
+/** Set or replace the key, for the provider named in the body or in use. */
 router.post("/", verifyGuard, async (req, res) => {
   const apiKey =
     typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
@@ -63,38 +102,47 @@ router.post("/", verifyGuard, async (req, res) => {
     return res.status(400).json({ error: "API_KEY_REQUIRED" });
   }
 
-  // ── Ask Google before storing ────────────────────────────────────────────
+  const existing = await AISettings.findOne({ businessId: req.businessId });
+  const providerId = providerIdFor(req, existing);
+  const provider = getProvider(providerId);
+
+  // ── Ask the provider before storing ──────────────────────────────────────
   // A key that cannot make a call is worse than no key at all: it saves
   // cleanly, and the failure only surfaces later inside a feature that then
   // looks broken for some unrelated reason. One cheap call here costs a second
   // and turns that into a sentence next to the field the user just typed in.
-  const check = await verifyGeminiKey(apiKey, model || undefined);
+  const check = await provider.verifyKey(apiKey, model || undefined);
   if (!check.ok) {
     // A missing model is otherwise a dead end — the key is fine and the user
-    // has no way to know what to put instead. Ask Google what this key can
-    // actually use and hand the names back.
-    if (check.error === "GEMINI_MODEL_UNAVAILABLE") {
-      const available = await suggestFlashModels(apiKey);
+    // has no way to know what to put instead. Ask the provider what this key
+    // can actually use and hand the names back.
+    if (check.error === "AI_MODEL_UNAVAILABLE") {
+      const available = await provider.suggestModels(apiKey);
       return res.status(400).json({ error: check.error, available });
     }
-    return res.status(400).json({ error: check.error });
+    // `detail` is the provider's own sentence, when it gave one: "no quota
+    // left" is a kind of problem, and only they can say which plan or limit.
+    return res.status(400).json({ error: check.error, detail: check.detail });
   }
 
   const settings = await AISettings.findOneAndUpdate(
     { businessId: req.businessId },
     {
       businessId: req.businessId,
-      "gemini.apiKey": encrypt(apiKey),
-      "gemini.maskedKey": maskKey(apiKey),
-      "gemini.enabled": true,
+      // Saving a key also selects that provider: nobody adds a key for a
+      // provider they did not mean to start using.
+      provider: providerId,
+      [`${providerId}.apiKey`]: encrypt(apiKey),
+      [`${providerId}.maskedKey`]: maskKey(apiKey),
+      [`${providerId}.enabled`]: true,
       // Records a check that actually happened: this line is only reached
       // after the block above returned ok.
-      "gemini.lastVerifiedAt": new Date(),
+      [`${providerId}.lastVerifiedAt`]: new Date(),
       // The model that was just verified, not the one requested. When no model
       // is supplied these are the same, but pinning it here means the stored
       // model can never drift from the one the key was tested against — which
       // is the failure mode that passes at save and breaks in production.
-      "gemini.model": check.model,
+      [`${providerId}.model`]: check.model,
     },
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );
@@ -118,35 +166,52 @@ router.patch("/", guardModelChange, async (req, res) => {
   const model =
     typeof req.body?.model === "string" ? req.body.model.trim() : "";
 
+  const current = await AISettings.findOne({ businessId: req.businessId });
+  const providerId = providerIdFor(req, current);
+
+  /**
+   * Switching provider is only allowed to one that already holds a key.
+   *
+   * Otherwise the switch would leave the business "configured" with nothing
+   * to call, and every insight would fail with a code that sounds like the
+   * provider's fault. Add the key first; saving it selects the provider.
+   */
+  if (isProviderId(req.body?.provider) && req.body.provider !== current?.provider) {
+    if (!credentialsFor(current, providerId)) {
+      return res.status(400).json({ error: "PROVIDER_NOT_CONFIGURED" });
+    }
+    update.provider = providerId;
+  }
+
   if (typeof req.body?.enabled === "boolean") {
-    update["gemini.enabled"] = req.body.enabled;
+    update[`${providerId}.enabled`] = req.body.enabled;
   }
 
   if (model) {
-    const current = await AISettings.findOne({ businessId: req.businessId });
-    if (!current?.gemini?.apiKey) {
+    if (!credentialsFor(current, providerId)) {
       return res.status(404).json({ error: "NOT_CONFIGURED" });
     }
 
     let apiKey;
     try {
-      apiKey = decrypt(current.gemini.apiKey);
+      apiKey = decrypt(current[providerId].apiKey);
     } catch {
       return res.status(500).json({ error: "KEY_UNREADABLE" });
     }
 
-    const check = await verifyGeminiKey(apiKey, model);
+    const provider = getProvider(providerId);
+    const check = await provider.verifyKey(apiKey, model);
     if (!check.ok) {
-      if (check.error === "GEMINI_MODEL_UNAVAILABLE") {
-        const available = await suggestFlashModels(apiKey);
+      if (check.error === "AI_MODEL_UNAVAILABLE") {
+        const available = await provider.suggestModels(apiKey);
         return res.status(400).json({ error: check.error, available });
       }
-      return res.status(400).json({ error: check.error });
+      return res.status(400).json({ error: check.error, detail: check.detail });
     }
 
-    update["gemini.model"] = check.model;
+    update[`${providerId}.model`] = check.model;
     // The check above just happened, against this model and this key.
-    update["gemini.lastVerifiedAt"] = new Date();
+    update[`${providerId}.lastVerifiedAt`] = new Date();
   }
 
   if (Object.keys(update).length === 0) {
@@ -166,15 +231,18 @@ router.patch("/", guardModelChange, async (req, res) => {
   res.json({ data: settings.toSafeJSON() });
 });
 
-/** Forget the key and turn Gemini off. */
+/** Forget the key for the provider in use, and turn it off. */
 router.delete("/", async (req, res) => {
+  const current = await AISettings.findOne({ businessId: req.businessId });
+  const providerId = providerIdFor(req, current);
+
   await AISettings.findOneAndUpdate(
     { businessId: req.businessId },
     {
-      "gemini.apiKey": null,
-      "gemini.maskedKey": null,
-      "gemini.enabled": false,
-      "gemini.lastVerifiedAt": null,
+      [`${providerId}.apiKey`]: null,
+      [`${providerId}.maskedKey`]: null,
+      [`${providerId}.enabled`]: false,
+      [`${providerId}.lastVerifiedAt`]: null,
     },
   );
 
@@ -196,13 +264,15 @@ router.post("/test", verifyGuard, async (req, res) => {
     typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
   let apiKey = provided;
 
+  const settings = await AISettings.findOne({ businessId: req.businessId });
+  const providerId = providerIdFor(req, settings);
+
   if (!apiKey) {
-    const settings = await AISettings.findOne({ businessId: req.businessId });
-    if (!settings?.gemini?.apiKey) {
+    if (!credentialsFor(settings, providerId)) {
       return res.status(404).json({ error: "NOT_CONFIGURED" });
     }
     try {
-      apiKey = decrypt(settings.gemini.apiKey);
+      apiKey = decrypt(settings[providerId].apiKey);
     } catch {
       // Uncaught, this fell through to the generic 500 handler and the form
       // could only say "something went wrong".
@@ -215,9 +285,9 @@ router.post("/test", verifyGuard, async (req, res) => {
       ? req.body.model.trim()
       : undefined;
 
-  const check = await verifyGeminiKey(apiKey, model);
+  const check = await getProvider(providerId).verifyKey(apiKey, model);
   if (!check.ok) {
-    return res.status(400).json({ error: check.error });
+    return res.status(400).json({ error: check.error, detail: check.detail });
   }
 
   res.json({ data: { ok: true, model: check.model } });
@@ -226,38 +296,43 @@ router.post("/test", verifyGuard, async (req, res) => {
 /**
  * The models the stored key can actually call.
  *
- * Only offered for a saved key: the list is fetched from Google using the
- * stored credential, so without one there is nothing to ask about — and that
- * 404 is what gates the model selector in the settings UI. Rate-limited like
- * /test, because listing models is a live Google call and the settings form
- * is exactly where a retry loop happens.
+ * Only offered for a saved key: the list is fetched from the provider using
+ * the stored credential, so without one there is nothing to ask about — and
+ * that 404 is what gates the model selector in the settings UI. Rate-limited
+ * like /test, because listing models is a live upstream call and the settings
+ * form is exactly where a retry loop happens.
  */
 router.get("/models", verifyGuard, async (req, res) => {
   const settings = await AISettings.findOne({ businessId: req.businessId });
-  if (!settings?.gemini?.apiKey) {
+  const providerId = isProviderId(req.query?.provider)
+    ? req.query.provider
+    : (settings?.provider ?? DEFAULT_PROVIDER);
+
+  if (!credentialsFor(settings, providerId)) {
     return res.status(404).json({ error: "NOT_CONFIGURED" });
   }
 
   let apiKey;
   try {
-    apiKey = decrypt(settings.gemini.apiKey);
+    apiKey = decrypt(settings[providerId].apiKey);
   } catch {
     // The ciphertext no longer verifies — the record was altered or the
     // encryption key rotated. KEY_UNREADABLE, the same code the insights route
-    // uses: GEMINI_KEY_INVALID told the merchant Google had rejected a key that
-    // Google never saw, and sent them to check a key that was fine.
+    // uses: AI_KEY_INVALID told the merchant the provider had rejected a key
+    // it never saw, and sent them to check a key that was fine.
     return res.status(500).json({ error: "KEY_UNREADABLE" });
   }
 
-  const list = await listAvailableModels(apiKey);
+  const list = await getProvider(providerId).listModels(apiKey);
   if (!list.ok) {
     return res.status(400).json({ error: list.error });
   }
 
   res.json({
     data: {
+      provider: providerId,
       models: list.models,
-      current: settings.gemini.model ?? null,
+      current: settings[providerId]?.model ?? null,
     },
   });
 });

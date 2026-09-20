@@ -14,26 +14,52 @@ const encryptedValueSchema = new mongoose.Schema(
   { _id: false },
 );
 
+/**
+ * One provider's credentials. The same shape for every provider, so a new one
+ * is a field below rather than a new schema.
+ *
+ * `model` is a default only. POST / overwrites it with the model it actually
+ * verified, so a saved key can never be used against a model it was not tested
+ * with. PATCH still accepts any string, unverified — it exists so a user can
+ * switch to one of the names a failed check handed back.
+ */
+const providerCredentialsSchema = (defaultModel) => ({
+  enabled: { type: Boolean, default: true },
+  model: { type: String, default: defaultModel },
+  apiKey: { type: encryptedValueSchema, default: null },
+  maskedKey: { type: String, default: null },
+  lastVerifiedAt: { type: Date, default: null },
+});
+
 const aiSettingsSchema = new mongoose.Schema(
   {
     // String, not ObjectId: the id arrives from another system's token, and
     // casting it here would couple this service to their id format.
     businessId: { type: String, required: true, unique: true, index: true },
 
-    gemini: {
-      enabled: { type: Boolean, default: true },
-      // Default only. POST / overwrites this with the model it actually
-      // verified, so a saved key can never be used against a model it was not
-      // tested with. PATCH still accepts any string, unverified — it exists so
-      // a user can switch to one of the names a failed check handed back.
-      model: { type: String, default: "gemini-3.6-flash" },
-      apiKey: { type: encryptedValueSchema, default: null },
-      maskedKey: { type: String, default: null },
-      lastVerifiedAt: { type: Date, default: null },
-    },
+    /**
+     * Which provider this business uses. Defaults to Gemini, which is what
+     * every record written before there was a choice is using — so existing
+     * businesses keep working with no migration.
+     */
+    provider: { type: String, default: "gemini" },
+
+    // One block per provider, rather than one shared block, so switching
+    // provider does not throw away the key for the old one: switch back and
+    // it still works.
+    gemini: providerCredentialsSchema("gemini-3.6-flash"),
+    openrouter: providerCredentialsSchema("openrouter/free"),
+    groq: providerCredentialsSchema("openai/gpt-oss-20b"),
+    cerebras: providerCredentialsSchema("gpt-oss-120b"),
+    mistral: providerCredentialsSchema("mistral-small-latest"),
   },
   { timestamps: true },
 );
+
+/** The credentials for the provider in use. */
+aiSettingsSchema.methods.active = function active() {
+  return this[this.provider] ?? this.gemini;
+};
 
 /**
  * The only shape allowed to leave the server.
@@ -42,12 +68,14 @@ const aiSettingsSchema = new mongoose.Schema(
  * later cannot leak by default.
  */
 aiSettingsSchema.methods.toSafeJSON = function toSafeJSON() {
+  const active = this.active();
   return {
-    configured: Boolean(this.gemini?.apiKey),
-    enabled: Boolean(this.gemini?.enabled),
-    model: this.gemini?.model ?? null,
-    maskedKey: this.gemini?.maskedKey ?? null,
-    lastVerifiedAt: this.gemini?.lastVerifiedAt ?? null,
+    provider: this.provider ?? "gemini",
+    configured: Boolean(active?.apiKey),
+    enabled: Boolean(active?.enabled),
+    model: active?.model ?? null,
+    maskedKey: active?.maskedKey ?? null,
+    lastVerifiedAt: active?.lastVerifiedAt ?? null,
     updatedAt: this.updatedAt,
   };
 };
@@ -58,6 +86,10 @@ aiSettingsSchema.methods.toSafeJSON = function toSafeJSON() {
 aiSettingsSchema.set("toJSON", {
   transform(_doc, ret) {
     if (ret.gemini) delete ret.gemini.apiKey;
+    if (ret.openrouter) delete ret.openrouter.apiKey;
+    if (ret.groq) delete ret.groq.apiKey;
+    if (ret.cerebras) delete ret.cerebras.apiKey;
+    if (ret.mistral) delete ret.mistral.apiKey;
     return ret;
   },
 });
