@@ -28,7 +28,7 @@
  * answer it has rather than an error — a card that is an hour old is worth
  * more to a merchant than an empty panel.
  */
-export function rateLimit({
+function rateLimit({
   windowMs = 60_000,
   max = 10,
   error = "RATE_LIMITED",
@@ -76,7 +76,7 @@ export function rateLimit({
  * (even one refresh every 3 minutes fits) while still capping a runaway loop
  * at 20 calls before it must wait.
  */
-export const insightsRateLimit = (onLimit) =>
+const insightsRateLimit = (onLimit) =>
   rateLimit({
     windowMs: 60 * 60 * 1000,
     max: 20,
@@ -89,5 +89,7 @@ export const insightsRateLimit = (onLimit) =>
  * minute. Verifying is cheap but still a live Google call, and the settings
  * form is exactly the place a double-click or impatient retry happens.
  */
-export const verifyRateLimit = () =>
+const verifyRateLimit = () =>
   rateLimit({ windowMs: 60 * 1000, max: 10, error: "VERIFY_RATE_LIMIT" });
+
+module.exports = { rateLimit, insightsRateLimit, verifyRateLimit };

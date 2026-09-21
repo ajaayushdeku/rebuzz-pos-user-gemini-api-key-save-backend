@@ -22,21 +22,21 @@ can never read it back:
 
 ## Providers
 
-`src/services/providers.js` is the registry; each provider is one file beside
+`helpers/aiProviders/index.js` is the registry; each provider is one file beside
 it exposing the same four calls (`verifyKey`, `listModels`, `suggestModels`,
 `generateInsights`). Adding a third is a new file and an entry there — no route
 changes, because nothing else imports a provider directly.
 
 | Provider     | File                         | Default model                              | Notes                                                       |
 | ------------ | ---------------------------- | ------------------------------------------ | ----------------------------------------------------------- |
-| `gemini`     | `src/services/gemini.js`     | `gemini-3.6-flash`                         | Flash models only; the free tier stopped covering Pro       |
-| `openrouter` | `src/services/openrouter.js` | `openrouter/free`                          | Free, text-only, structured-output models only              |
-| `groq`       | `src/services/groq.js`       | `openai/gpt-oss-20b`                       | Only the families Groq documents as honouring `json_schema` |
-| `mistral`    | `src/services/mistral.js`    | `mistral-small-latest`                     | Limits are per model; see the save-time fallback below      |
-| `nvidia`     | `src/services/nvidia.js`     | `openai/gpt-oss-20b`                       | NVIDIA NIM trial credits                                    |
+| `gemini`     | `helpers/aiProviders/gemini.js` | `gemini-3.6-flash`                         | Flash models only; the free tier stopped covering Pro       |
+| `openrouter` | `helpers/aiProviders/openrouter.js` | `openrouter/free`                          | Free, text-only, structured-output models only              |
+| `groq`       | `helpers/aiProviders/groq.js` | `openai/gpt-oss-20b`                       | Only the families Groq documents as honouring `json_schema` |
+| `mistral`    | `helpers/aiProviders/mistral.js` | `mistral-small-latest`                     | Limits are per model; see the save-time fallback below      |
+| `nvidia`     | `helpers/aiProviders/nvidia.js` | `openai/gpt-oss-20b`                       | NVIDIA NIM trial credits                                    |
 
 Every provider but Gemini is the OpenAI-compatible shape, so they share
-`src/services/openaiCompatible.js` and are a short configuration each: base
+`helpers/aiProviders/openaiCompatible.js` and are a short configuration each: base
 URL, key check, and which models to offer. Another provider of that shape is
 another such file.
 
@@ -157,7 +157,7 @@ Without `cacheKey` the route behaves exactly as before.
 
 ## Rate limiting
 
-Two per-business in-memory guards (`src/lib/rateLimit.js`), scoped by the
+Two per-business in-memory guards (`middlewares/aiRateLimit.js`), scoped by the
 verified `businessId`:
 
 | Budget     | Routes that spend it                                                              | Limit             | Error code            |
@@ -193,6 +193,44 @@ shared store if this ever runs as multiple replicas.
   data.
 - Errors: message only. Provider SDK error objects can echo the request back
   with the key in it.
+
+## Layout
+
+Laid out like `khajaGharBackend` (CommonJS, Express 4, Mongoose 6), so each
+file has an obvious home when this service moves into it:
+
+| Here                               | Does                                                   |
+| ---------------------------------- | ------------------------------------------------------ |
+| `app.js`                           | Boot checks, CORS, request log, error handler          |
+| `routes/api.js`                    | Mounts the routers under `/api`                        |
+| `api/business/aiSettings.js`       | Settings routes and their rate limit                   |
+| `api/business/aiInsights.js`       | Insight route: prepare → cache → rate limit → generate |
+| `controller/aiSettingsController.js`, `controller/aiInsightsController.js` | The handlers |
+| `models/aiSettings.js`, `models/aiInsightCache.js` (`models/index.js`) | Schemas     |
+| `middlewares/requireBusiness.js`   | Who is calling, asked of the POS API                   |
+| `middlewares/aiRateLimit.js`       | Per-business in-memory limits                          |
+| `helpers/aiCrypto.js`              | AES-256-GCM for stored keys                            |
+| `helpers/aiProviders/`             | Provider registry (`index.js`) and one file each       |
+| `configs/dbConnection.js`          | This service's own database                            |
+
+## Moving into khajaGharBackend
+
+What stays the way it is only because this runs as its own service:
+
+- **`businessId` and `adminId` are Strings.** Both arrive from the POS API's
+  answer, not from this service's own database. In khajaGharBackend they become
+  `{ type: ObjectId, ref: "Business" }` and `{ type: ObjectId, ref: "User" }`.
+  Records written before `adminId` existed pick it up on their next settings
+  change; the rest can be backfilled from `Business` by `_id` at the move.
+- **`requireBusiness`** is replaced by `JWT.sessionRequired` and a `Business`
+  lookup on the tenant admin id (`role === "admin" ? user._id : user.adminId`).
+- **Responses** are `{ data }` / `{ error: CODE }`, which the frontend's error
+  messages are keyed on. khajaGharBackend answers `{ status, data }`, so either
+  the frontend or these controllers change at the move — not both.
+- **Rate limits** are in memory. khajaGharBackend already runs Redis
+  (`middlewares/rateLimitMiddleware.js`, `makeRateLimiter`).
+- **`configs/dbConnection.js`** and `app.js` are dropped; khajaGharBackend's own
+  connection and server take over, and `AI_ENCRYPTION_KEY` moves to its `.env`.
 
 ## Getting started
 

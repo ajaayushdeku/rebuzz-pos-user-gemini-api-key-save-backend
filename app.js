@@ -1,10 +1,9 @@
-import express from "express";
-import cors from "cors";
+const express = require("express");
+const cors = require("cors");
 
-import { connectDatabase, disconnectDatabase } from "./config/db.js";
-import { assertEncryptionReady } from "./lib/crypto.js";
-import aiSettingsRouter from "./routes/aiSettings.js";
-import aiInsightsRouter from "./routes/aiInsights.js";
+const { connectDatabase, disconnectDatabase } = require("./configs/dbConnection");
+const { assertEncryptionReady } = require("./helpers/aiCrypto");
+const ApiRouter = require("./routes/api");
 
 const PORT = Number(process.env.PORT ?? 4000);
 
@@ -79,14 +78,14 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.use("/api/settings/ai", aiSettingsRouter);
-app.use("/api/ai-insights", aiInsightsRouter);
+app.use("/api", ApiRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "NOT_FOUND" });
 });
 
-// Express 5 forwards rejected promises here, so routes need no async wrapper.
+// Controllers answer their own failures (Express 4 does not forward a
+// rejected promise); this catches the rest, such as a malformed JSON body.
 app.use((error, _req, res, _next) => {
   // Message only. Error objects from the provider SDK can echo the request
   // back, key included.

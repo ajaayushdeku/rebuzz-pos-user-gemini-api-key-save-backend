@@ -1,7 +1,7 @@
 /**
  * Mistral: a large free allowance, OpenAI-compatible.
  *
- * Everything about making the call is shared (services/openaiCompatible.js).
+ * Everything about making the call is shared (helpers/aiProviders/openaiCompatible.js).
  * What is Mistral's own is here: where it lives, and which of its models can
  * write an insight.
  *
@@ -10,7 +10,7 @@
  * so — the briefings carry a business's sales figures and product names.
  */
 
-import { createOpenAiCompatibleProvider } from "./openaiCompatible.js";
+const { createOpenAiCompatibleProvider } = require("./openaiCompatible");
 
 const BASE = "https://api.mistral.ai/v1";
 
@@ -42,6 +42,12 @@ const provider = createOpenAiCompatibleProvider({
   },
 });
 
-export const { verifyKey, listModels, suggestModels, generateInsights } =
-  provider;
-export { DEFAULT_MODEL };
+const { verifyKey, listModels, suggestModels, generateInsights } = provider;
+
+module.exports = {
+  DEFAULT_MODEL,
+  verifyKey,
+  listModels,
+  suggestModels,
+  generateInsights,
+};

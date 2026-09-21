@@ -1,23 +1,15 @@
-import { GoogleGenAI } from "@google/genai";
+const { GoogleGenAI } = require("@google/genai");
 
 /**
- * Current stable Flash model, and the one Google's own 404 names as the
- * replacement for the older ones. Flash rather than Pro on purpose: this is
- * BYOK, so it is the merchant's quota, and Flash is what the free tier covers.
- *
- * The model line moves — 2.0-flash has since been shut down and 2.5-flash is
- * closed to new users — so this is a default, not an allowlist. A key that
- * cannot call this model is caught at save time and offered the ones it can
- * use; see suggestFlashModels below.
+ * Current stable Flash model. Flash, not Pro: it is the merchant's own quota,
+ * and only Flash is on the free tier. A default, not an allowlist — a key that
+ * cannot call it is offered alternatives at save time (suggestFlashModels).
  */
 const DEFAULT_MODEL = "gemini-3.6-flash";
 
 /**
- * Map a provider failure onto a code the caller can act on.
- *
- * Raw provider errors are never returned: they leak internals and give the
- * user nothing to do. An invalid key, an exhausted quota and a rate limit
- * each need a different fix, so they get different codes.
+ * Map a Gemini failure to a code the caller can act on. Raw errors are never
+ * returned: a bad key, a spent quota and a rate limit each need a different fix.
  */
 function normalizeError(error) {
   const status = error?.status ?? error?.response?.status;
@@ -38,13 +30,10 @@ function normalizeError(error) {
 }
 
 /**
- * One cheap call, purely to find out whether a key works.
- *
- * The error object is never logged whole — provider errors can echo the
- * request back, key included. Status and message are enough to tell a missing
- * model from a dead key, and neither carries the credential.
+ * One-token call to check that a key works. Logs status and message only —
+ * the full error object can echo the key back.
  */
-export async function verifyGeminiKey(apiKey, model = DEFAULT_MODEL) {
+async function verifyGeminiKey(apiKey, model = DEFAULT_MODEL) {
   try {
     const ai = new GoogleGenAI({ apiKey });
     await ai.models.generateContent({
@@ -64,14 +53,8 @@ export async function verifyGeminiKey(apiKey, model = DEFAULT_MODEL) {
   }
 }
 
-/**
- * The models this key may actually use.
- *
- * "Model not available" is otherwise a dead end: the caller cannot tell a
- * retired model from a project that was never granted access, and guessing
- * names one at a time is a poor way to find out.
- */
-export async function listGeminiModels(apiKey) {
+/** Every model name the key can see, unfiltered (used by list-models.mjs). */
+async function listGeminiModels(apiKey) {
   try {
     const ai = new GoogleGenAI({ apiKey });
     const names = [];
@@ -84,13 +67,7 @@ export async function listGeminiModels(apiKey) {
   }
 }
 
-/**
- * Words that rule a model out of the selector, whatever else its name says.
- *
- * One list, shared. It used to be written out twice — once here and once in
- * `suggestFlashModels` — and two copies of a list that has to follow Google's
- * model line are two copies that drift.
- */
+/** Name fragments that rule a model out of the selector. */
 const EXCLUDED_MODEL_WORDS = [
   "image",
   "tts",
@@ -105,12 +82,8 @@ const EXCLUDED_MODEL_WORDS = [
 ];
 
 /**
- * Whether a model name is one worth offering.
- *
- * Flash only: the free tier stopped covering Pro models in 2026, so offering
- * one would send the user into a billing wall. Previews and `-latest` aliases
- * are out too — both move or vanish without notice, a poor thing to hand
- * someone as a setting they will store and forget.
+ * Flash only (Pro is off the free tier). Previews and `-latest` aliases are
+ * skipped too: they change or vanish, which is wrong for a stored setting.
  */
 function isOfferableFlashModel(name) {
   return (
@@ -121,28 +94,18 @@ function isOfferableFlashModel(name) {
   );
 }
 
-/** Google caps a page at a thousand. Asking for the cap avoids most paging. */
+/** Google's maximum page size; asking for it avoids most paging. */
 const MODELS_PAGE_SIZE = 1000;
 
 /**
- * The models this key may actually use, straight from Google's models endpoint.
+ * Flash models this key can use for insights, newest first.
  *
- * GET https://generativelanguage.googleapis.com/v1beta/models with the key in
- * the x-goog-api-key header. The header rather than a query parameter because
- * a key in a URL lands in access logs, proxies and browser history — the
- * header keeps the credential out of everything that records the request line.
- *
- * Every page is read. The endpoint returns fifty models per page unless told
- * otherwise, and a key's list runs past that, so reading only the first page
- * silently dropped whichever models sorted onto the second — which, for an
- * alphabetical list, can be the newest ones.
- *
- * Listed does not mean usable. A key's model list includes entries it cannot
- * call — gemini-2.5-flash is listed for every key and 404s for new ones —
- * and many "flash" entries are audio, image or realtime variants that
- * generateContent cannot drive at all.
+ * - The key goes in a header, not the URL, so it stays out of access logs.
+ * - Every page is read; the first page alone can miss the newest models.
+ * - Listed is not the same as usable, hence the generateContent and name
+ *   filters below.
  */
-export async function listAvailableModels(apiKey) {
+async function listAvailableModels(apiKey) {
   try {
     const entries = [];
     let pageToken = "";
@@ -156,13 +119,11 @@ export async function listAvailableModels(apiKey) {
 
       const res = await fetch(url, {
         headers: { "x-goog-api-key": apiKey },
-        // Without a timeout a slow Google holds the settings request open
-        // indefinitely, and the form's spinner with it.
+        // A slow Google must not hold the settings form open forever.
         signal: AbortSignal.timeout(10_000),
       });
 
       if (!res.ok) {
-        // Mirror a provider failure onto the same codes everything else uses.
         const code = normalizeError({ status: res.status });
         console.warn(
           `[gemini] list models failed code=${code} status=${res.status}`,
@@ -177,9 +138,8 @@ export async function listAvailableModels(apiKey) {
     } while (pageToken);
 
     const models = entries
+      // Only models that can write text; an embedding model would 400 on use.
       .filter((entry) =>
-        // Only what generateContent can drive: the selector feeds insight
-        // calls, and offering an embedding model there would 400 on first use.
         entry?.supportedGenerationMethods?.includes("generateContent"),
       )
       .map((entry) => String(entry?.name ?? "").replace(/^models\//, ""))
@@ -194,62 +154,33 @@ export async function listAvailableModels(apiKey) {
 }
 
 /**
- * Flash models this key can use, newest first.
- *
- * Called only when a model has already 404'd, to turn a dead end into a
- * choice. Deliberately derived from Google's own answer rather than a
- * hardcoded allowlist: the model line moves, and a static list would start
- * rejecting names that are perfectly valid — the same trap as validating an
- * API key by its prefix.
- *
- * Built on `listAvailableModels` so a suggestion and the selector can never
- * disagree. It used to filter names only, which meant it could suggest a model
- * that generateContent cannot drive — the very failure it exists to recover
- * from.
+ * Up to five usable models to offer after a model 404s. Built on
+ * listAvailableModels so suggestions and the selector always agree.
  */
-export async function suggestFlashModels(apiKey) {
+async function suggestFlashModels(apiKey) {
   const list = await listAvailableModels(apiKey);
   return list.ok ? list.models.slice(0, 5) : [];
 }
 
 /**
- * One insight call, on the business's own key and quota — with retries.
- *
- * The caller supplies all three inputs, and each does a different job:
- *
- * - `briefing` is the facts. The model cannot see the database, so this is a
- *   short written summary of the figures already on screen.
- * - `systemInstruction` is the job description. Who the model is answering as,
- *   and what it is for.
- * - `responseSchema` is the form to fill in. Without it the model returns
- *   prose, which has to be parsed by guesswork and renders differently every
- *   time. With it, the answer arrives as fields the UI can lay out.
- *
- * Transient upstream failures (busy model, per-minute quota) are retried with
- * a backoff before being reported, so a demand spike shows up as a slightly
- * slower card rather than an error. Retries happen here rather than in the
- * browser: the loop stays out of the rate limiter's accounting (each UI-driven
- * retry would otherwise burn one of the 20 hourly slots for the same user
- * request), and the merchant's key never has to leave this process.
- */
-/**
- * The ceiling on one insight reply, thinking included.
- *
- * The Flash models this service uses think before they answer, and the
- * thinking is billed against the same `maxOutputTokens` as the answer. The
- * cap was 2,048. On a normal day's briefing a measured call spent 1,314
- * tokens thinking and 516 answering — 1,830 of the 2,048 — and thinking
- * varies from call to call: the same briefing, capped a little lower, spent
- * 1,439 thinking and was cut off 47 tokens into its answer. A cut-off answer
- * is half a JSON document, which reached the merchant as "The AI answered in a
- * format we couldn't read."
- *
- * A ceiling, not a charge: only the tokens actually generated are billed, so
- * headroom costs nothing on a call that does not need it.
+ * Output ceiling per insight reply, thinking included. Flash thinks before it
+ * answers and both count against this; at 2,048 replies were cut off mid-JSON.
+ * Only tokens actually generated are billed, so the headroom is free.
  */
 const INSIGHTS_MAX_OUTPUT_TOKENS = 8_192;
 
-export async function generateInsights(
+/**
+ * One insight call on the business's own key, with retries.
+ *
+ * - `briefing`: the facts — a written summary of the figures on screen.
+ * - `systemInstruction`: the model's role and task.
+ * - `responseSchema`: the JSON shape the answer must fill, so the UI gets
+ *   fields instead of prose.
+ *
+ * Busy-model and per-minute failures are retried here, not in the browser, so
+ * retries do not use up the hourly rate limit.
+ */
+async function generateInsights(
   apiKey,
   {
     briefing,
@@ -287,12 +218,11 @@ export async function generateInsights(
     }
   }
 
-  // Unreachable — the loop returns on every path — but keeps the contract
-  // honest for the compiler and for anyone reading without the loop in mind.
+  // Unreachable: every loop path returns.
   return { ok: false, error: lastError };
 }
 
-/** One Gemini call. Extracted so generateInsights can retry it. */
+/** A single Gemini call, split out so generateInsights can retry it. */
 async function generateOnce(
   apiKey,
   { briefing, systemInstruction, responseSchema, model, maxOutputTokens },
@@ -304,8 +234,7 @@ async function generateOnce(
     contents: briefing,
     config: {
       ...(systemInstruction ? { systemInstruction } : {}),
-      // Both or neither. A schema without the JSON mime type is ignored, and
-      // the model quietly goes back to prose.
+      // The schema is ignored unless the JSON mime type is set with it.
       ...(responseSchema
         ? {
             responseMimeType: "application/json",
@@ -320,10 +249,8 @@ async function generateOnce(
   const text = response.text ?? "";
   const finishReason = response.candidates?.[0]?.finishReason;
 
-  // Reported as what it is. A reply that hit the token ceiling stops mid-word,
-  // and passed on it failed to parse downstream and was blamed on the model's
-  // "format" — which sent anyone investigating after the wrong thing. Not
-  // retried: the same briefing under the same ceiling runs out the same way.
+  // A reply cut off at the token ceiling is reported as truncated, not passed
+  // on to fail parsing. Not retried: the same call would run out the same way.
   if (finishReason === "MAX_TOKENS") {
     console.warn(
       `[gemini] insights truncated model=${model} maxOutputTokens=${maxOutputTokens} thinking=${
@@ -333,9 +260,8 @@ async function generateOnce(
     return { ok: false, error: "GEMINI_TRUNCATED" };
   }
 
+  // Usually a safety block: the call worked but said nothing.
   if (!text.trim()) {
-    // An empty body is usually a safety block or a truncated response, and
-    // it is not a provider error — the call succeeded and said nothing.
     return { ok: false, error: "GEMINI_EMPTY_RESPONSE" };
   }
 
@@ -343,34 +269,33 @@ async function generateOnce(
     ok: true,
     text,
     model,
-    // Passed back so the caller can show what the request cost. It is the
-    // merchant's own quota being spent, so it should not be invisible.
+    // Returned so the merchant can see what their own quota was spent on.
     usage: {
       promptTokens: response.usageMetadata?.promptTokenCount ?? null,
       outputTokens: response.usageMetadata?.candidatesTokenCount ?? null,
       totalTokens: response.usageMetadata?.totalTokenCount ?? null,
-      // Counted apart from the answer. It is usually the larger share of an
-      // insight call's cost, and it is what ran the ceiling out before.
+      // Often the larger share of the cost, so counted separately.
       thinkingTokens: response.usageMetadata?.thoughtsTokenCount ?? null,
     },
   };
 }
 
 /**
- * Codes worth another attempt, and no others.
- *
- * `GEMINI_UNAVAILABLE` is Google saying "the model is busy" (503) — spikes are
- * usually over in seconds, so waiting and retrying turns a user-visible error
- * into a slightly slower success. `GEMINI_RATE_LIMIT` is a per-minute quota
- * bump (429) — one retry after a pause is usually enough. Everything else
- * (invalid key, quota exhausted, malformed output) fails the same way on
- * every attempt, so retrying would just bill waiting time.
+ * Only temporary failures are retried: a busy model (503) or a per-minute
+ * limit (429). A bad key or spent quota fails the same way every time.
  */
 const RETRYABLE = new Set(["GEMINI_UNAVAILABLE", "GEMINI_RATE_LIMIT"]);
 
-/** Delays before the 2nd and 3rd attempt. Under 10 s total, so the dashboard
- * request stays well inside the proxy's patience while covering a typical
- * demand spike. */
+/** Waits before the 2nd and 3rd attempts; under 10 s in total. */
 const RETRY_DELAYS_MS = [2_000, 6_000];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+module.exports = {
+  DEFAULT_MODEL,
+  verifyGeminiKey,
+  listGeminiModels,
+  listAvailableModels,
+  suggestFlashModels,
+  generateInsights,
+};

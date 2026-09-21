@@ -1,5 +1,5 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
+const crypto = require("crypto");
+const fs = require("fs");
 
 const ALGORITHM = "aes-256-gcm";
 const IV_BYTES = 12;
@@ -40,11 +40,11 @@ const getKeys = () => {
 };
 
 /** Call once at boot so a misconfigured key fails now, not on first write. */
-export const assertEncryptionReady = () => {
+const assertEncryptionReady = () => {
   getKeys();
 };
 
-export const encrypt = (plaintext) => {
+const encrypt = (plaintext) => {
   // A fresh IV every time. Reusing one under the same key breaks GCM badly:
   // it leaks the XOR of the plaintexts and lets the auth tag be forged.
   const iv = crypto.randomBytes(IV_BYTES);
@@ -65,7 +65,7 @@ export const encrypt = (plaintext) => {
   };
 };
 
-export const decrypt = (record) => {
+const decrypt = (record) => {
   const decipher = crypto.createDecipheriv(
     ALGORITHM,
     getKeys(),
@@ -82,8 +82,10 @@ export const decrypt = (record) => {
 };
 
 /** "AIza••••4f2c" — for display, never a usable credential. */
-export const maskKey = (plaintext) => {
+const maskKey = (plaintext) => {
   const value = plaintext.trim();
   if (value.length <= 10) return "••••";
   return `${value.slice(0, 4)}••••${value.slice(-4)}`;
 };
+
+module.exports = { assertEncryptionReady, encrypt, decrypt, maskKey };

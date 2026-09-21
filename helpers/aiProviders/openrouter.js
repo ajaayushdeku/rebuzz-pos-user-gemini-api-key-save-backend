@@ -2,12 +2,12 @@
  * OpenRouter: one key, many models, several of them free.
  *
  * Everything about making the call is shared with the other OpenAI-compatible
- * providers (services/openaiCompatible.js). What is OpenRouter's own is here:
+ * providers (helpers/aiProviders/openaiCompatible.js). What is OpenRouter's own is here:
  * where it lives, how a key is checked, and which of its models are worth
  * offering a merchant.
  */
 
-import { createOpenAiCompatibleProvider } from "./openaiCompatible.js";
+const { createOpenAiCompatibleProvider } = require("./openaiCompatible");
 
 const BASE = "https://openrouter.ai/api/v1";
 
@@ -72,6 +72,12 @@ const provider = createOpenAiCompatibleProvider({
     isFree(entry) && canDoStructuredOutput(entry) && writesTextOnly(entry),
 });
 
-export const { verifyKey, listModels, suggestModels, generateInsights } =
-  provider;
-export { DEFAULT_MODEL };
+const { verifyKey, listModels, suggestModels, generateInsights } = provider;
+
+module.exports = {
+  DEFAULT_MODEL,
+  verifyKey,
+  listModels,
+  suggestModels,
+  generateInsights,
+};

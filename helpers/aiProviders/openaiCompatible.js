@@ -6,7 +6,7 @@
  * common part lives here, and each provider is a short configuration file
  * beside it rather than a second copy of the same 300 lines.
  *
- * Errors use the provider-neutral `AI_*` vocabulary; see services/providers.js.
+ * Errors use the provider-neutral `AI_*` vocabulary; see helpers/aiProviders/index.js.
  */
 
 /** Ten seconds is plenty for a key check or a model list; a hung request holds the settings form open. */
@@ -94,7 +94,7 @@ function errorMessageOf(json) {
  * here rather than in eight section files — the app already drops anything
  * that comes back malformed, so this only has to satisfy the provider.
  */
-export function toStrictSchema(schema) {
+function toStrictSchema(schema) {
   if (Array.isArray(schema)) return schema.map(toStrictSchema);
   if (!schema || typeof schema !== "object") return schema;
 
@@ -121,7 +121,7 @@ export function toStrictSchema(schema) {
  * @param {string} [config.keyCheckPath] A cheap GET that proves a key is real.
  * @param {(entry: object) => boolean} config.offerModel  Which listed models to offer.
  */
-export function createOpenAiCompatibleProvider({
+function createOpenAiCompatibleProvider({
   id,
   baseUrl,
   defaultModel,
@@ -402,3 +402,5 @@ export function createOpenAiCompatibleProvider({
 
   return { verifyKey, listModels, suggestModels, generateInsights, defaultModel };
 }
+
+module.exports = { toStrictSchema, createOpenAiCompatibleProvider };

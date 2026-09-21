@@ -1,12 +1,12 @@
 /**
  * Groq: a free tier on very fast hardware, OpenAI-compatible.
  *
- * Everything about making the call is shared (services/openaiCompatible.js).
+ * Everything about making the call is shared (helpers/aiProviders/openaiCompatible.js).
  * What is Groq's own is here — chiefly which models to offer, because Groq's
  * catalogue is mostly models this app cannot use.
  */
 
-import { createOpenAiCompatibleProvider } from "./openaiCompatible.js";
+const { createOpenAiCompatibleProvider } = require("./openaiCompatible");
 
 const BASE = "https://api.groq.com/openai/v1";
 
@@ -48,6 +48,12 @@ const provider = createOpenAiCompatibleProvider({
   },
 });
 
-export const { verifyKey, listModels, suggestModels, generateInsights } =
-  provider;
-export { DEFAULT_MODEL };
+const { verifyKey, listModels, suggestModels, generateInsights } = provider;
+
+module.exports = {
+  DEFAULT_MODEL,
+  verifyKey,
+  listModels,
+  suggestModels,
+  generateInsights,
+};

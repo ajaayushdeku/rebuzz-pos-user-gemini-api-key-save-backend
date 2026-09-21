@@ -1,4 +1,4 @@
-import mongoose from "mongoose";
+const mongoose = require("mongoose");
 
 /**
  * Connect once at boot.
@@ -6,7 +6,7 @@ import mongoose from "mongoose";
  * Mongoose keeps its own pool, so this is called a single time and every
  * model reuses it — connecting per request would open a new pool each time.
  */
-export async function connectDatabase() {
+async function connectDatabase() {
   const uri = process.env.MONGODB_URI;
   if (!uri) {
     throw new Error("MONGODB_URI is not set");
@@ -16,6 +16,8 @@ export async function connectDatabase() {
   // the default buffers commands for 10s and then errors inside the request,
   // which reads as a broken route rather than a missing database.
   mongoose.set("bufferCommands", false);
+  // As khajaGharBackend sets it, so queries behave the same after the move.
+  mongoose.set("strictQuery", false);
 
   mongoose.connection.on("disconnected", () => {
     console.warn("[db] disconnected");
@@ -31,6 +33,8 @@ export async function connectDatabase() {
   console.info("[db] connected");
 }
 
-export async function disconnectDatabase() {
+async function disconnectDatabase() {
   await mongoose.connection.close();
 }
+
+module.exports = { connectDatabase, disconnectDatabase };

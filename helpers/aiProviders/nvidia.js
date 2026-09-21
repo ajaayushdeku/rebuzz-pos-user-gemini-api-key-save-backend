@@ -2,13 +2,13 @@
  * NVIDIA NIM: a free developer allowance across a large catalogue of models,
  * OpenAI-compatible.
  *
- * Everything about making the call is shared (services/openaiCompatible.js).
+ * Everything about making the call is shared (helpers/aiProviders/openaiCompatible.js).
  * What is NVIDIA's own is here, and it is mostly the catalogue: their list
  * carries embedding, vision, safety, translation and parsing models beside
  * the chat ones, and says nothing about which can follow a JSON schema.
  */
 
-import { createOpenAiCompatibleProvider } from "./openaiCompatible.js";
+const { createOpenAiCompatibleProvider } = require("./openaiCompatible");
 
 const BASE = "https://integrate.api.nvidia.com/v1";
 
@@ -61,6 +61,12 @@ const provider = createOpenAiCompatibleProvider({
   },
 });
 
-export const { verifyKey, listModels, suggestModels, generateInsights } =
-  provider;
-export { DEFAULT_MODEL };
+const { verifyKey, listModels, suggestModels, generateInsights } = provider;
+
+module.exports = {
+  DEFAULT_MODEL,
+  verifyKey,
+  listModels,
+  suggestModels,
+  generateInsights,
+};

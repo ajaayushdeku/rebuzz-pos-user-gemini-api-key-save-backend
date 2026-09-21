@@ -17,16 +17,16 @@
  *   AI_UNAVAILABLE · AI_TRUNCATED · AI_EMPTY_RESPONSE · AI_MALFORMED_RESPONSE
  */
 
-import {
-  generateInsights as geminiGenerate,
-  listAvailableModels as geminiListModels,
-  suggestFlashModels as geminiSuggest,
+const {
+  generateInsights: geminiGenerate,
+  listAvailableModels: geminiListModels,
+  suggestFlashModels: geminiSuggest,
   verifyGeminiKey,
-} from "./gemini.js";
-import * as openrouter from "./openrouter.js";
-import * as groq from "./groq.js";
-import * as mistral from "./mistral.js";
-import * as nvidia from "./nvidia.js";
+} = require("./gemini");
+const openrouter = require("./openrouter");
+const groq = require("./groq");
+const mistral = require("./mistral");
+const nvidia = require("./nvidia");
 
 /**
  * The Gemini service still speaks its own `GEMINI_*` codes.
@@ -58,7 +58,7 @@ const gemini = {
  * and a key that cannot call the default is caught at save time and offered
  * what it can use instead.
  */
-export const PROVIDERS = {
+const PROVIDERS = {
   gemini: {
     id: "gemini",
     label: "Google Gemini",
@@ -109,12 +109,12 @@ export const PROVIDERS = {
 };
 
 /** The provider ids, for validating what arrives from a request. */
-export const PROVIDER_IDS = Object.keys(PROVIDERS);
+const PROVIDER_IDS = Object.keys(PROVIDERS);
 
 /** The one used when a business has never chosen — and every existing one. */
-export const DEFAULT_PROVIDER = "gemini";
+const DEFAULT_PROVIDER = "gemini";
 
-export function isProviderId(value) {
+function isProviderId(value) {
   return typeof value === "string" && PROVIDER_IDS.includes(value);
 }
 
@@ -125,12 +125,12 @@ export function isProviderId(value) {
  * older or newer version of the service, and a settings page that 500s is a
  * worse answer than one that shows the default provider.
  */
-export function getProvider(id) {
+function getProvider(id) {
   return PROVIDERS[id] ?? PROVIDERS[DEFAULT_PROVIDER];
 }
 
 /** What the settings UI needs to describe the choices. Never any credentials. */
-export function providerCatalogue() {
+function providerCatalogue() {
   return PROVIDER_IDS.map((id) => ({
     id,
     label: PROVIDERS[id].label,
@@ -138,3 +138,12 @@ export function providerCatalogue() {
     keysUrl: PROVIDERS[id].keysUrl,
   }));
 }
+
+module.exports = {
+  PROVIDERS,
+  PROVIDER_IDS,
+  DEFAULT_PROVIDER,
+  isProviderId,
+  getProvider,
+  providerCatalogue,
+};

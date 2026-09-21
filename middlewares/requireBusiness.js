@@ -8,8 +8,11 @@ const POS_API_URL = process.env.POS_API_URL;
  * from the answer. The id therefore always originates from a verified token
  * and never from the request body — a client-supplied id would let any
  * authenticated business read and spend another's key.
+ *
+ * Inside khajaGharBackend this whole middleware is replaced by
+ * JWT.sessionRequired plus a Business lookup on the tenant admin id.
  */
-export default async function requireBusiness(req, res, next) {
+const requireBusiness = async (req, res, next) => {
   const header = req.get("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
 
@@ -43,17 +46,23 @@ export default async function requireBusiness(req, res, next) {
 
   const json = await upstream.json().catch(() => null);
 
-  // Shape confirmed against the POS API: { data: { business: { _id, ... } } }.
-  // `_id` is the tenant, not `adminId` — one admin can hold several
-  // businesses, and scoping by the admin would pool their keys together.
-  const businessId = json?.data?.business?._id ?? null;
+  // Shape confirmed against the POS API: { data: { business: { _id, adminId, ... } } }
+  // (Business.formatted). `_id` is the tenant every lookup here is scoped by;
+  // `adminId` is stored beside it because that is how khajaGharBackend scopes
+  // its own models.
+  const business = json?.data?.business;
+  const businessId = business?._id ?? null;
+  const adminId = business?.adminId ?? null;
 
-  if (!businessId) {
+  if (!businessId || !adminId) {
     return res.status(502).json({ error: "AUTH_UPSTREAM_SHAPE" });
   }
 
   req.businessId = String(businessId);
+  req.adminId = String(adminId);
   // Kept for the insights route, which reads POS analytics as this user.
   req.posToken = token;
   next();
-}
+};
+
+module.exports = requireBusiness;
