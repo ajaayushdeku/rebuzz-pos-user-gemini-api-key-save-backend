@@ -1,6 +1,6 @@
 # Rebuzz AI Service
 
-Stores each business's own AI provider key — Google Gemini or OpenRouter — and
+Stores each business's own AI provider key — Google Gemini, OpenRouter, Groq and others — and
 makes model calls on their behalf so the key never reaches a browser.
 
 Separate from the main POS API (`api.beta.rebuzzpos.com`) because that codebase
@@ -27,20 +27,32 @@ it exposing the same four calls (`verifyKey`, `listModels`, `suggestModels`,
 `generateInsights`). Adding a third is a new file and an entry there — no route
 changes, because nothing else imports a provider directly.
 
-| Provider     | File                         | Default model       | Notes                                                       |
-| ------------ | ---------------------------- | ------------------- | ----------------------------------------------------------- |
-| `gemini`     | `src/services/gemini.js`     | `gemini-3.6-flash`  | Flash models only; the free tier stopped covering Pro       |
-| `openrouter` | `src/services/openrouter.js` | `openrouter/free`   | Free, text-only, structured-output models only              |
-| `groq`       | `src/services/groq.js`       | `openai/gpt-oss-20b` | Only the families Groq documents as honouring `json_schema` |
+| Provider     | File                         | Default model                              | Notes                                                       |
+| ------------ | ---------------------------- | ------------------------------------------ | ----------------------------------------------------------- |
+| `gemini`     | `src/services/gemini.js`     | `gemini-3.6-flash`                         | Flash models only; the free tier stopped covering Pro       |
+| `openrouter` | `src/services/openrouter.js` | `openrouter/free`                          | Free, text-only, structured-output models only              |
+| `groq`       | `src/services/groq.js`       | `openai/gpt-oss-20b`                       | Only the families Groq documents as honouring `json_schema` |
+| `mistral`    | `src/services/mistral.js`    | `mistral-small-latest`                     | Limits are per model; see the save-time fallback below      |
+| `nvidia`     | `src/services/nvidia.js`     | `openai/gpt-oss-20b`                       | NVIDIA NIM trial credits                                    |
 
-OpenRouter and Groq are both the OpenAI-compatible shape, so they share
+Every provider but Gemini is the OpenAI-compatible shape, so they share
 `src/services/openaiCompatible.js` and are a short configuration each: base
-URL, key check, and which models to offer. A third provider of that shape is
+URL, key check, and which models to offer. Another provider of that shape is
 another such file.
 
+Free tiers change terms without notice. A provider that starts asking for a
+card before its free tier works answers `AI_PAYMENT_REQUIRED`, whatever status
+it sent, so the merchant is told that rather than "no quota" or "rate limit".
+
+When a new key is refused on the default model for a rate or quota limit, the
+save tries up to three of the key's other models and keeps the first that
+answers (`fellBackFrom` in the response says so). If none do, the save fails
+with `AI_PLAN_LIMIT` — on a key that has never been used, that means the plan
+does not include those models, and waiting will not help.
+
 A business's chosen provider is `provider` on its settings document, and each
-provider's credentials live in their own block (`gemini`, `openrouter`), so
-switching does not throw away the key for the other one. A record written
+provider's credentials live in their own block (`gemini`, `openrouter`, …), so
+switching does not throw away the key for another one. A record written
 before there was a choice has no `provider` and reads as `gemini`.
 
 Errors use one provider-neutral vocabulary — `AI_KEY_INVALID`,

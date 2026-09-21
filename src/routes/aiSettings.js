@@ -111,7 +111,41 @@ router.post("/", verifyGuard, async (req, res) => {
   // cleanly, and the failure only surfaces later inside a feature that then
   // looks broken for some unrelated reason. One cheap call here costs a second
   // and turns that into a sentence next to the field the user just typed in.
-  const check = await provider.verifyKey(apiKey, model || undefined);
+  let check = await provider.verifyKey(apiKey, model || undefined);
+
+  /**
+   * A limit on the very first request is the plan, not traffic.
+   *
+   * A key that was just created has made no calls, so "rate limit exceeded"
+   * on its first one cannot mean it made too many. It means the model tried
+   * has no allowance on this account — Mistral, for one, sets limits per
+   * model, and its free plan leaves some models at zero. The key itself is
+   * fine; the default model just is not in the plan. So try the models the
+   * key can see before giving up, and keep the first that answers.
+   *
+   * Only when the merchant did not name a model: if they chose one, telling
+   * them it is refused is the answer, not quietly swapping it for another.
+   */
+  let fellBackFrom = null;
+  if (!check.ok && !model && PLAN_LIMIT_CODES.has(check.error)) {
+    const fallback = await firstWorkingModel(
+      provider,
+      apiKey,
+      check.model ?? provider.defaultModel,
+    );
+    if (fallback) {
+      fellBackFrom = provider.defaultModel;
+      check = fallback;
+    } else {
+      // Every model refused the same way. Said as what it almost certainly
+      // is, since "try again shortly" would send them to wait for nothing.
+      return res.status(400).json({
+        error: "AI_PLAN_LIMIT",
+        detail: check.detail,
+      });
+    }
+  }
+
   if (!check.ok) {
     // A missing model is otherwise a dead end — the key is fine and the user
     // has no way to know what to put instead. Ask the provider what this key
@@ -147,8 +181,46 @@ router.post("/", verifyGuard, async (req, res) => {
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );
 
-  res.json({ data: settings.toSafeJSON() });
+  res.json({
+    data: {
+      ...settings.toSafeJSON(),
+      // Set when the default model was refused and another was kept, so the
+      // form can say which — a merchant who later wonders why insights come
+      // from a model they never picked should have been told when it happened.
+      ...(fellBackFrom ? { fellBackFrom } : {}),
+    },
+  });
 });
+
+/**
+ * Refusals that mean "not in your plan" when they arrive on a first request:
+ * a per-minute limit, or a spent quota. Anything else is a real answer about
+ * the key and is reported as it is.
+ */
+const PLAN_LIMIT_CODES = new Set(["AI_RATE_LIMIT", "AI_QUOTA_EXCEEDED"]);
+
+/** How many other models to try before concluding the plan allows none. */
+const FALLBACK_ATTEMPTS = 3;
+
+/**
+ * The first model this key can actually call, other than the one that failed.
+ *
+ * Asks the provider for its list rather than guessing names, and stops after a
+ * few: every attempt is a real request against a key that may genuinely be
+ * limited, and a merchant waiting on a save button should not wait through a
+ * provider's whole catalogue.
+ */
+export async function firstWorkingModel(provider, apiKey, failedModel) {
+  const candidates = (await provider.suggestModels(apiKey))
+    .filter((name) => name && name !== failedModel)
+    .slice(0, FALLBACK_ATTEMPTS);
+
+  for (const name of candidates) {
+    const attempt = await provider.verifyKey(apiKey, name);
+    if (attempt.ok) return attempt;
+  }
+  return null;
+}
 
 /**
  * Toggle `enabled` or change the model. Deliberately cannot set the key.

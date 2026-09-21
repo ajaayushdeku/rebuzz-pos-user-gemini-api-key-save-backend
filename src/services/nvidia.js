@@ -23,7 +23,7 @@ const DEFAULT_MODEL = "openai/gpt-oss-20b";
  * Families worth offering: ones known to follow `json_schema`.
  *
  * NVIDIA's `/models` is a plain list — id, owner, nothing about capability —
- * so as with Groq and Cerebras this is recognised by name. Deliberately
+ * so as with Groq this is recognised by name. Deliberately
  * conservative: a model that ignores the schema does not fail loudly, it
  * produces cards the app then drops, which reaches the merchant as an empty
  * section.

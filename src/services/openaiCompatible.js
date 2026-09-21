@@ -43,6 +43,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function normalizeError(status, message = "") {
   const text = String(message).toLowerCase();
 
+  // A provider that has started asking for a card before its free tier works,
+  // as free tiers sometimes do. Checked first, whatever the status: it is
+  // neither a bad key nor a limit, and waiting or trying other models will not
+  // change it.
+  if (/payment method|add (a|your) (card|payment)|billing (details|info)/.test(text)) {
+    return "AI_PAYMENT_REQUIRED";
+  }
+
   if (status === 401 || status === 403) return "AI_KEY_INVALID";
   if (status === 402) return "AI_QUOTA_EXCEEDED";
   if (status === 429) {
@@ -66,7 +74,7 @@ function normalizeError(status, message = "") {
  * The message a provider puts in a failure, without the rest of the body.
  *
  * Three shapes, because "OpenAI-compatible" stops at the happy path: OpenAI
- * and OpenRouter nest it under `error`, Groq and Cerebras put it at the top
+ * and OpenRouter nest it under `error`, Groq and NVIDIA put it at the top
  * level, and Mistral uses `detail` — a string for a refusal, a list of field
  * complaints for a malformed request.
  */

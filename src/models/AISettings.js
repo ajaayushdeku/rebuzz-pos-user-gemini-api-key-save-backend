@@ -50,7 +50,6 @@ const aiSettingsSchema = new mongoose.Schema(
     gemini: providerCredentialsSchema("gemini-3.6-flash"),
     openrouter: providerCredentialsSchema("openrouter/free"),
     groq: providerCredentialsSchema("openai/gpt-oss-20b"),
-    cerebras: providerCredentialsSchema("gpt-oss-120b"),
     mistral: providerCredentialsSchema("mistral-small-latest"),
     nvidia: providerCredentialsSchema("openai/gpt-oss-20b"),
   },
@@ -89,7 +88,6 @@ aiSettingsSchema.set("toJSON", {
     if (ret.gemini) delete ret.gemini.apiKey;
     if (ret.openrouter) delete ret.openrouter.apiKey;
     if (ret.groq) delete ret.groq.apiKey;
-    if (ret.cerebras) delete ret.cerebras.apiKey;
     if (ret.mistral) delete ret.mistral.apiKey;
     if (ret.nvidia) delete ret.nvidia.apiKey;
     return ret;

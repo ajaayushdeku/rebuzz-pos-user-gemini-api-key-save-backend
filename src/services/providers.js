@@ -25,7 +25,6 @@ import {
 } from "./gemini.js";
 import * as openrouter from "./openrouter.js";
 import * as groq from "./groq.js";
-import * as cerebras from "./cerebras.js";
 import * as mistral from "./mistral.js";
 import * as nvidia from "./nvidia.js";
 
@@ -86,16 +85,6 @@ export const PROVIDERS = {
     listModels: groq.listModels,
     suggestModels: groq.suggestModels,
     generateInsights: groq.generateInsights,
-  },
-  cerebras: {
-    id: "cerebras",
-    label: "Cerebras",
-    defaultModel: cerebras.DEFAULT_MODEL,
-    keysUrl: "https://cloud.cerebras.ai",
-    verifyKey: cerebras.verifyKey,
-    listModels: cerebras.listModels,
-    suggestModels: cerebras.suggestModels,
-    generateInsights: cerebras.generateInsights,
   },
   mistral: {
     id: "mistral",
