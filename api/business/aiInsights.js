@@ -14,13 +14,28 @@ const quotaGuard = insightsRateLimit((req, res) =>
 );
 
 /**
- * In order: refuse what costs nothing, answer from the cache, then count
- * against the hour. Only a request that gets past all three reaches the
- * provider.
+ * What is left of the hour, without spending any of it.
+ *
+ * The settings screen shows the allowance before anything is generated, and
+ * nothing else on the page would tell it — the headers below only ride along
+ * with an insights request.
+ */
+router.get("/quota", requireBusiness, (req, res) => {
+  res.json({ status: "success", data: quotaGuard.snapshot(req) });
+});
+
+/**
+ * In order: report the allowance, refuse what costs nothing, answer from the
+ * cache, then count against the hour. Only a request that gets past all of it
+ * reaches the provider.
+ *
+ * `peek` runs before the cache so every answer carries the rate-limit headers,
+ * including the cached ones that cost no quota at all.
  */
 router.post(
   "/",
   requireBusiness,
+  quotaGuard.peek,
   aiInsightsController.prepare,
   aiInsightsController.serveCached,
   quotaGuard,
