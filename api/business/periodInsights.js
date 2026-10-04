@@ -37,18 +37,37 @@ router.get("/periods", requireBusiness, controller.listPeriods);
 router.get("/:kind/:id", requireBusiness, controller.resolvePeriod, controller.readPeriod);
 
 /**
- * Generate one section for one period: `ensure`, `regenerate` or `more`.
+ * Ask the model for one section, and get the answer back without it being kept.
  *
- * `ensure` is the only one a page sends on its own, and it is a no-op when the
- * answer already exists — which is the normal case for a closed period.
+ * Generating and storing are two routes because what a card finally shows is the
+ * answer joined onto the period's own figures — the item name and the numbers
+ * come from the data, the model supplies the advice against an anonymised
+ * reference. Only the caller holds both halves, so only the caller can finish the
+ * join, and what gets stored is the finished cards.
+ *
+ * The draft is cached for a day, so finishing the pair after a failure is free.
+ */
+router.post(
+  "/:kind/:id/:section/draft",
+  requireBusiness,
+  requireAdmin,
+  controller.resolvePeriod,
+  controller.prepareDraft,
+  controller.draft,
+);
+
+/**
+ * Keep the finished cards: `ensure`, `regenerate` or `more`.
+ *
+ * Also the route for a period with no sales (`empty: true`), which stores the
+ * fact without any provider being involved.
  */
 router.post(
   "/:kind/:id/:section",
   requireBusiness,
   requireAdmin,
   controller.resolvePeriod,
-  controller.prepare,
-  controller.generate,
+  controller.save,
 );
 
 module.exports = router;

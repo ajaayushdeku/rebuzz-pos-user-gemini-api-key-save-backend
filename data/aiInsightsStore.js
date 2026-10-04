@@ -37,7 +37,7 @@ const aiInsightsStore = {
       businessId,
       periodKind: period.kind,
       periodId: period.id,
-    }).sort({ section: 1 });
+    }).sort({ section: 1, generatedAt: 1 });
   },
 
   /** One stored answer, or null. */

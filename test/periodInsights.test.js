@@ -8,6 +8,7 @@ const {
 const { aiInsightsStore } = require("../data/aiInsightsStore");
 const AIInsights = require("../models/aiInsights");
 const AISettings = require("../models/aiSettings");
+const AIInsightCache = require("../models/aiInsightCache");
 const { encrypt } = require("../helpers/aiCrypto");
 const { PROVIDERS } = require("../helpers/aiProviders");
 const { previousClosedPeriod } = require("../helpers/analyticsPeriods");
@@ -94,7 +95,46 @@ const body = (extra = {}) => ({
   ...extra,
 });
 
-const generateChain = [controller.resolvePeriod, controller.prepare, controller.generate];
+const draftChain = [controller.resolvePeriod, controller.prepareDraft, controller.draft];
+const saveChain = [controller.resolvePeriod, controller.save];
+
+/**
+ * What a section route does: draft, join, store.
+ *
+ * The join is the frontend's work — the model's advice is keyed by an anonymised
+ * reference and the card's figures come from the period's own data — so here it
+ * stands in for that by passing the drafted items straight through. Everything
+ * else is exactly the sequence the real caller performs, which is why the
+ * assertions below still read as one action.
+ */
+const generate = async (req) => {
+  // A period with no sales never reaches a provider: there is nothing to ask.
+  if (req.body?.empty) {
+    const saved = await run(saveChain, { ...req });
+    if (saved.body?.data) saved.body.data.spent = false;
+    return saved;
+  }
+
+  const drafted = await run(draftChain, { ...req });
+  if (!drafted.body?.data) return drafted;
+
+  const { answer, model, provider, settingsModel, spent } = drafted.body.data;
+  const saved = await run(saveChain, {
+    ...req,
+    body: {
+      ...req.body,
+      items: Array.isArray(answer?.items) ? answer.items : [],
+      extra: answer && !Array.isArray(answer) ? { windows: answer.windows } : null,
+      model,
+      provider,
+      settingsModel,
+    },
+  });
+
+  // Carried through so a caller can still tell whether this cost anything.
+  if (saved.body?.data) saved.body.data.spent = spent;
+  return saved;
+};
 
 before(async () => {
   await mongoose.connect(TEST_URI, { serverSelectionTimeoutMS: 5000 });
@@ -125,6 +165,10 @@ before(async () => {
 
 beforeEach(async () => {
   await AIInsights.deleteMany({});
+  // The drafts too: a paid answer is cached for a day so the save half can be
+  // retried for free, which means a leftover draft would answer the next test
+  // and the provider would never be reached. Found exactly that way.
+  await AIInsightCache.deleteMany({});
   stub.reset();
 });
 
@@ -201,8 +245,7 @@ test("requests that could not succeed are refused without a provider call", asyn
   ];
 
   for (const [params, requestBody, code] of cases) {
-    const res = await run(
-      generateChain,
+    const res = await generate(
       makeReq({ params: { kind: "month", id: PERIOD.id, ...params }, body: requestBody }),
     );
     assert.equal(res.body.error, code, `${params.section}: ${JSON.stringify(requestBody).slice(0, 60)}`);
@@ -211,8 +254,7 @@ test("requests that could not succeed are refused without a provider call", asyn
 });
 
 test("a business with no key is told so rather than failing later", async () => {
-  const res = await run(
-    generateChain,
+  const res = await generate(
     makeReq({
       businessId: "business-with-no-key",
       params: { kind: "month", id: PERIOD.id, section: "pricing" },
@@ -227,8 +269,7 @@ test("a business with no key is told so rather than failing later", async () => 
 // ── ensure ───────────────────────────────────────────────────────────────────
 
 test("ensure generates once, then never again", async () => {
-  const first = await run(
-    generateChain,
+  const first = await generate(
     makeReq({ params: { kind: "month", id: PERIOD.id, section: "pricing" }, body: body() }),
   );
   assert.equal(first.statusCode, 200);
@@ -240,8 +281,7 @@ test("ensure generates once, then never again", async () => {
   assert.deepEqual(first.body.data.windows, { weeks: 4 });
   assert.equal(stub.calls, 1);
 
-  const second = await run(
-    generateChain,
+  const second = await generate(
     makeReq({ params: { kind: "month", id: PERIOD.id, section: "pricing" }, body: body() }),
   );
   assert.equal(second.body.data.spent, false);
@@ -251,8 +291,7 @@ test("ensure generates once, then never again", async () => {
 
 test("two simultaneous requests pay once and both get the answer", async () => {
   const request = () =>
-    run(
-      generateChain,
+    generate(
       makeReq({ params: { kind: "month", id: PERIOD.id, section: "pricing" }, body: body() }),
     );
 
@@ -270,7 +309,7 @@ test("two simultaneous requests pay once and both get the answer", async () => {
 
 test("regenerate replaces the answer and counts the revision", async () => {
   const params = { kind: "month", id: PERIOD.id, section: "pricing" };
-  await run(generateChain, makeReq({ params, body: body() }));
+  await generate(makeReq({ params, body: body() }));
 
   stub.reply = {
     ok: true,
@@ -279,7 +318,7 @@ test("regenerate replaces the answer and counts the revision", async () => {
     usage: null,
   };
 
-  const again = await run(generateChain, makeReq({ params, body: body({ mode: "regenerate" }) }));
+  const again = await generate(makeReq({ params, body: body({ mode: "regenerate" }) }));
   assert.equal(again.body.data.items.length, 1);
   assert.equal(again.body.data.items[0].id, "9");
   assert.equal(again.body.data.revision, 2);
@@ -289,7 +328,7 @@ test("regenerate replaces the answer and counts the revision", async () => {
 
 test("more appends, skips cards already shown, and stops when nothing is new", async () => {
   const params = { kind: "month", id: PERIOD.id, section: "menu-suggestions" };
-  await run(generateChain, makeReq({ params, body: body() }));
+  await generate(makeReq({ params, body: body() }));
 
   // A batch holding one new card and one already on screen.
   stub.reply = {
@@ -298,7 +337,7 @@ test("more appends, skips cards already shown, and stops when nothing is new", a
     model: "stub-model-1",
     usage: null,
   };
-  const more = await run(generateChain, makeReq({ params, body: body({ mode: "more" }) }));
+  const more = await generate(makeReq({ params, body: body({ mode: "more" }) }));
   assert.deepEqual(more.body.data.items.map((i) => i.id), ["1", "2"], "the duplicate is dropped");
   assert.equal(more.body.data.batches, 2);
   assert.equal(more.body.data.noMore, false);
@@ -310,19 +349,18 @@ test("more appends, skips cards already shown, and stops when nothing is new", a
     model: "stub-model-1",
     usage: null,
   };
-  const exhausted = await run(generateChain, makeReq({ params, body: body({ mode: "more" }) }));
+  const exhausted = await generate(makeReq({ params, body: body({ mode: "more" }) }));
   assert.equal(exhausted.body.data.noMore, true);
   assert.equal(exhausted.body.data.items.length, 2);
 
   // And once it has said so, asking again is refused rather than paid for.
-  const refused = await run(generateChain, makeReq({ params, body: body({ mode: "more" }) }));
+  const refused = await generate(makeReq({ params, body: body({ mode: "more" }) }));
   assert.equal(refused.statusCode, 409);
   assert.equal(refused.body.error, "NO_MORE_AVAILABLE");
 });
 
 test("more on a section that was never generated has nothing to extend", async () => {
-  const res = await run(
-    generateChain,
+  const res = await generate(
     makeReq({
       params: { kind: "month", id: PERIOD.id, section: "menu-suggestions" },
       body: body({ mode: "more" }),
@@ -336,8 +374,7 @@ test("more on a section that was never generated has nothing to extend", async (
 // ── A period with no sales ───────────────────────────────────────────────────
 
 test("an empty period is stored without calling the provider", async () => {
-  const res = await run(
-    generateChain,
+  const res = await generate(
     makeReq({
       params: { kind: "month", id: PERIOD.id, section: "pricing" },
       body: { promptVersion: "v3", empty: true, reason: "NO_SALES", basis: { orders: 0 } },
@@ -370,8 +407,7 @@ test("a provider refusal carries its code, sentence and timing", async () => {
     retryAfter: 42,
   };
 
-  const res = await run(
-    generateChain,
+  const res = await generate(
     makeReq({ params: { kind: "month", id: PERIOD.id, section: "pricing" }, body: body() }),
   );
 
@@ -386,8 +422,7 @@ test("a provider refusal carries its code, sentence and timing", async () => {
 test("an answer that is not JSON is reported as the model's failure", async () => {
   stub.reply = { ok: true, text: "Sorry, I can't help with that.", model: "stub-model-1" };
 
-  const res = await run(
-    generateChain,
+  const res = await generate(
     makeReq({ params: { kind: "month", id: PERIOD.id, section: "pricing" }, body: body() }),
   );
   assert.equal(res.statusCode, 502);
@@ -398,8 +433,7 @@ test("an answer that is not JSON is reported as the model's failure", async () =
 // ── Reading ──────────────────────────────────────────────────────────────────
 
 test("reading a period names what is there and what is missing", async () => {
-  await run(
-    generateChain,
+  await generate(
     makeReq({ params: { kind: "month", id: PERIOD.id, section: "pricing" }, body: body() }),
   );
 
@@ -429,8 +463,7 @@ test("reading a period nobody has generated is empty, not an error", async () =>
 });
 
 test("the period list marks which ones are ready", async () => {
-  await run(
-    generateChain,
+  await generate(
     makeReq({ params: { kind: "month", id: PERIOD.id, section: "pricing" }, body: body() }),
   );
 
@@ -455,8 +488,7 @@ test("quarters and years work through the same path", async () => {
     ["quarter", "2026-Q2"],
     ["year", "2025"],
   ]) {
-    const res = await run(
-      generateChain,
+    const res = await generate(
       makeReq({ params: { kind, id, section: "pricing" }, body: body() }),
     );
     assert.equal(res.statusCode, 200, `${kind} ${id}`);
@@ -464,4 +496,31 @@ test("quarters and years work through the same path", async () => {
   }
   // Three documents for one business: one per period, none colliding.
   assert.equal(await AIInsights.countDocuments({}), 2);
+});
+
+test("two prompt versions of one section read back as the newest", async () => {
+  const params = { kind: "month", id: PERIOD.id, section: "pricing" };
+
+  // v3's answer, then v4's beside it — what a prompt improvement leaves behind.
+  await generate(makeReq({ params, body: body({ promptVersion: "v3" }) }));
+  stub.reply = {
+    ok: true,
+    text: JSON.stringify({ items: [{ id: "new", text: "Written by v4" }] }),
+    model: "stub-model-2",
+    usage: null,
+  };
+  await generate(makeReq({ params, body: body({ promptVersion: "v4" }) }));
+
+  assert.equal(await AIInsights.countDocuments({ section: "pricing" }), 2, "both are kept");
+
+  const res = await run(
+    [controller.resolvePeriod, controller.readPeriod],
+    makeReq({ params: { kind: "month", id: PERIOD.id } }),
+  );
+
+  // One card for the section, and it is v4's — not whichever the database
+  // happened to return last.
+  assert.equal(Object.keys(res.body.data.sections).length, 1);
+  assert.equal(res.body.data.sections.pricing.promptVersion, "v4");
+  assert.equal(res.body.data.sections.pricing.items[0].id, "new");
 });

@@ -57,6 +57,37 @@ section.
 | Generate more | unchanged: `menu-suggestions` and `sales-recommendations` only, capped by `MAX_MORE_BATCHES` |
 | Prompt version bumped | the old answer stays, with "newer analysis available — regenerate". Auto-regenerating would spend for every business on every deploy. |
 
+## Generating is two calls, not one
+
+A card is the model's answer **joined onto the period's own figures**: the item
+name, the current price and the numbers come from the data, and the model
+supplies only the advice, keyed by an anonymised reference (`parsePricing` joins
+on `facts.candidates`). Whoever holds the data must finish that join — and what
+gets stored has to be the finished cards, because the figures are gone by the
+next visit.
+
+So the caller does three things, and only the middle one costs money:
+
+| | |
+| --- | --- |
+| `GET /period-insights/:kind/:id` | the period's windows, and what is already stored. When the section is there, it stops — no reports are fetched and nothing is spent. |
+| `POST …/:section/draft` | asks the model and returns the answer **without storing it**. Behind the in-flight lock. |
+| `POST …/:section` | stores the finished cards (`items`), or an empty period. |
+
+A paid draft is cached for 26 hours under its own key, so the second half failing
+— a dropped connection, a restart, a bad deploy — costs a retry rather than
+another provider call. `mode: "regenerate"` and `"more"` bypass that cache, since
+both mean "ask again".
+
+The draft also refuses what the save would refuse — `more` on a section with
+nothing stored, or one that offers no batches — so a provider is never paid for an
+answer that cannot be kept.
+
+**A trap this creates for tests and tools:** deleting a stored insight does not
+make the next draft call a provider; the cached draft answers instead. Anything
+wanting a genuinely fresh generation must clear both, which is what
+`resetSection` in `scripts/period-smoke.js` does.
+
 ## Limits and errors
 
 The application's hourly limiter is **gone**. What replaces it:

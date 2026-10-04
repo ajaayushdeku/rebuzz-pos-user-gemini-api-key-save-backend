@@ -38,6 +38,100 @@ const card = (n) => ({
   impact: n % 2 === 0 ? "high" : "medium",
 });
 
+/**
+ * The references a briefing listed, read off its own lines.
+ *
+ * Every section writes them the same way — `- <ref> · <name> · …` — so this
+ * works whatever the prefix. Guessing the shape of a ref instead (`i3f2a`) only
+ * ever worked for pricing: staffing and retention build theirs differently, and
+ * the mismatch shows up as a section that silently produces no cards.
+ */
+function refsFromBriefing(briefing) {
+  const found = [];
+  for (const line of String(briefing).split(/\r?\n/)) {
+    const match = /^[-*]\s+(\S+)\s+·/.exec(line.trim());
+    if (match && !found.includes(match[1])) found.push(match[1]);
+  }
+  return found.slice(0, 3);
+}
+
+/**
+ * The array a section wants its cards in, and the schema of one card.
+ *
+ * Not always `items`: sales recommendations ask for `recommendations`, and its
+ * parser reads that name and nothing else. A stub that always answered `items`
+ * produced a reply the section discarded in full — indistinguishable from a model
+ * that ignored the schema, and mistaken for one.
+ *
+ * So the name is read from the schema: the first property that is an array.
+ */
+function envelopeOf(responseSchema) {
+  const properties = responseSchema?.properties ?? {};
+  for (const [name, property] of Object.entries(properties)) {
+    if (property?.type === "array") {
+      return { name, item: property.items ?? null };
+    }
+  }
+  return { name: "items", item: null };
+}
+
+/**
+ * An object satisfying one card's schema, field by field.
+ *
+ * Why bother: a section drops any answer missing the fields it needs — pricing
+ * wants a `verdict` and at least one line of `advice` before it will show a card.
+ * A stub that returns its own shape is therefore indistinguishable from a model
+ * that answered badly, and every section would appear to generate nothing.
+ *
+ * Filling from the schema means each section gets an answer in its own shape
+ * without this file knowing anything about any of them.
+ */
+function fillFromSchema(schema, n, ref) {
+  if (!schema?.properties) {
+    const plain = card(n);
+    return ref ? { ...plain, ref } : plain;
+  }
+
+  const value = {};
+
+  for (const [name, property] of Object.entries(schema.properties)) {
+    // The reference is the one field that must be real: it is what the section
+    // joins on.
+    if (name === "ref" && ref) {
+      value.ref = ref;
+      continue;
+    }
+    value[name] = valueFor(property, name, n);
+  }
+
+  return value;
+}
+
+/** One field, by type. Enums take their first option, which is always valid. */
+function valueFor(property, name, n) {
+  if (Array.isArray(property?.enum) && property.enum.length > 0) {
+    return property.enum[0];
+  }
+
+  switch (property?.type) {
+    case "string":
+      return `Stub ${name} ${n} — from AI_STUB_PROVIDER, not real advice.`;
+    case "number":
+    case "integer":
+      // Deliberately above zero: several sections drop a figure of nothing, and
+      // a suggested price has to beat the cost to be shown at all.
+      return 100 + n;
+    case "boolean":
+      return true;
+    case "array":
+      return [valueFor(property.items, name, n)];
+    case "object":
+      return fillFromSchema(property, n, null);
+    default:
+      return `Stub ${name} ${n}`;
+  }
+}
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function generateInsights(_apiKey, { briefing = "", responseSchema } = {}) {
@@ -67,10 +161,24 @@ async function generateInsights(_apiKey, { briefing = "", responseSchema } = {})
   sequence += 1;
   const first = sequence * 10;
 
-  // Two cards per answer, with ids that never repeat — so "generate more" has
-  // something new to append and the deduplication is not what is being tested.
-  const answer = { items: [card(first), card(first + 1)] };
+  /**
+   * Answer against the references the briefing listed, when it listed any.
+   *
+   * Sections do not display the model's words alone: most join the answer onto
+   * their own figures by a reference (`i3f2a`), and a card only exists when a
+   * reference matches. A stub that invents its own ids therefore produces zero
+   * cards — which looks exactly like a broken join, and was taken for one.
+   *
+   * The refs are read back out of the briefing, which is where the section put
+   * them, so the join is exercised rather than sidestepped.
+   */
+  const refs = [...new Set(briefing.match(/\bi[0-9a-z]{4,6}\b/g) ?? [])].slice(0, 3);
 
+  const envelope = envelopeOf(responseSchema);
+  const cards = (refs.length ? refs : [null, null]).map((ref, index) =>
+    fillFromSchema(envelope.item, first + index, ref),
+  );
+  const answer = { [envelope.name]: cards };
   return {
     ok: true,
     // Shaped as the caller's schema asked, to the extent the stub can: an object

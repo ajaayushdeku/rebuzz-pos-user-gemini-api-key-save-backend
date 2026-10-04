@@ -142,3 +142,23 @@ test("the picker lists closed periods, newest first", () => {
   );
   assert.ok(periods.every((p) => p.closed));
 });
+
+test("each period names the one before it, of the same shape", () => {
+  const september = describePeriod("month", "2026-09", OCT_4);
+  assert.equal(september.previous.id, "2026-08");
+  assert.equal(september.previous.from, "2026-08-01");
+  assert.equal(september.previous.to, "2026-08-31");
+
+  // January's predecessor is last December, not month zero.
+  const january = describePeriod("month", "2026-01", OCT_4);
+  assert.equal(january.previous.id, "2025-12");
+
+  // A quarter is compared with a quarter, a year with a year — never with a
+  // window of a different length.
+  assert.equal(describePeriod("quarter", "2026-Q3", OCT_4).previous.id, "2026-Q2");
+  assert.equal(describePeriod("quarter", "2026-Q1", OCT_4).previous.id, "2025-Q4");
+  assert.equal(describePeriod("year", "2025", OCT_4).previous.id, "2024");
+
+  // And it stops there: no infinite chain of predecessors.
+  assert.equal(september.previous.previous, undefined);
+});

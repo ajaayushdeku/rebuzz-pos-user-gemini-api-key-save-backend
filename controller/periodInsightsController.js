@@ -1,5 +1,6 @@
 const { aiInsightsStore } = require("../data/aiInsightsStore");
 const AISettings = require("../models/aiSettings");
+const AIInsightCache = require("../models/aiInsightCache");
 const { decrypt } = require("../helpers/aiCrypto");
 const { DEFAULT_PROVIDER, getProvider } = require("../helpers/aiProviders");
 const { runOnce } = require("../helpers/inFlight");
@@ -42,6 +43,14 @@ const MAX_INSTRUCTION_CHARS = 4_000;
 const MAX_BATCHES = 5;
 /** A note of what the answer was based on, not a second briefing. */
 const MAX_BASIS_KEYS = 24;
+/**
+ * How long a paid draft is kept while the caller joins it onto the figures.
+ *
+ * A day, not a few minutes: it is there so that the store half failing costs a
+ * retry rather than another provider call. Reuses the day-scoped cache
+ * collection, which already expires its own documents.
+ */
+const DRAFT_TTL_MS = 26 * 60 * 60 * 1000;
 
 const internalError = (res, err) => {
   // Message only: provider SDK errors can echo the request back, key included.
@@ -167,8 +176,22 @@ const periodInsightsController = {
     try {
       const stored = await aiInsightsStore.readPeriod(req.businessId, req.period);
 
+      /**
+       * One entry per section — the newest, when a section has answers under more
+       * than one prompt version.
+       *
+       * That happens on every prompt improvement: v3's answer stays stored while
+       * v4's is written beside it. Both are legitimately there, but a page shows
+       * one card per section, and "whichever the database returned last" is not a
+       * choice. The newest wins, and `promptVersion` travels with it so the
+       * caller can see its own version is ahead and offer to regenerate.
+       */
       const sections = {};
-      for (const document of stored) sections[document.section] = document.formatted();
+      for (const document of stored) {
+        const current = sections[document.section];
+        if (current && new Date(current.generatedAt) > document.generatedAt) continue;
+        sections[document.section] = document.formatted();
+      }
 
       res.json({
         data: {
@@ -178,6 +201,10 @@ const periodInsightsController = {
             label: req.period.label,
             from: req.period.from,
             to: req.period.to,
+            // The caller fetches the POS reports, so it needs both windows —
+            // and takes them from here rather than working them out, so a
+            // stored insight can never describe a window other than its own.
+            previous: req.period.previous,
           },
           sections,
           missing: PERIOD_SECTIONS.filter((name) => !sections[name]),
@@ -190,25 +217,17 @@ const periodInsightsController = {
   },
 
   /**
-   * Everything that can refuse a generation before anything is spent.
+   * Everything that can refuse a draft before anything is spent.
    *
    * Runs after `requireAdmin`: reading is for everyone, paying is not.
    */
-  async prepare(req, res, next) {
+  async prepareDraft(req, res, next) {
     try {
       const { section } = req.params;
       if (!isSectionName(section) || !isPeriodSection(section)) {
         // A name this service does not know, or one that is not period-scoped —
         // festival-prep belongs on the day-scoped route, not here.
         return res.status(400).json({ error: "INVALID_SECTION" });
-      }
-
-      const mode = req.body?.mode ?? "ensure";
-      if (!["ensure", "regenerate", "more"].includes(mode)) {
-        return res.status(400).json({ error: "INVALID_MODE" });
-      }
-      if (mode === "more" && !supportsMore(section)) {
-        return res.status(400).json({ error: "MORE_NOT_SUPPORTED" });
       }
 
       const promptVersion = req.body?.promptVersion;
@@ -219,19 +238,36 @@ const periodInsightsController = {
       }
 
       /**
-       * A period with nothing in it.
+       * The mode is checked here as well as at the save, deliberately.
        *
-       * The caller knows — it read the reports. Stored as an answer so the page
-       * can say "no sales in September" and never ask again, and no provider is
-       * called, because with no figures a model can only invent.
+       * Without it, asking for a further batch of a section that has none — or
+       * of one that does not offer batches at all — would pay a provider for an
+       * answer the save then refuses. The check costs one indexed read.
        */
-      const empty = req.body?.empty === true;
+      const mode = req.body?.mode ?? "ensure";
+      if (!["ensure", "regenerate", "more"].includes(mode)) {
+        return res.status(400).json({ error: "INVALID_MODE" });
+      }
+      if (mode === "more") {
+        if (!supportsMore(section)) {
+          return res.status(400).json({ error: "MORE_NOT_SUPPORTED" });
+        }
+        const existing = await aiInsightsStore.readSection({
+          businessId: req.businessId,
+          period: req.period,
+          section,
+          promptVersion,
+        });
+        if (!existing) return res.status(404).json({ error: "NOTHING_TO_EXTEND" });
+        if (existing.noMore) return res.status(409).json({ error: "NO_MORE_AVAILABLE" });
+        if (existing.batches >= MAX_BATCHES) {
+          return res.status(409).json({ error: "BATCH_LIMIT_REACHED" });
+        }
+      }
 
       const briefing =
         typeof req.body?.briefing === "string" ? req.body.briefing.trim() : "";
-      if (!empty && !briefing) {
-        return res.status(400).json({ error: "BRIEFING_REQUIRED" });
-      }
+      if (!briefing) return res.status(400).json({ error: "BRIEFING_REQUIRED" });
       if (briefing.length > MAX_BRIEFING_CHARS) {
         return res.status(400).json({ error: "BRIEFING_TOO_LONG" });
       }
@@ -248,42 +284,25 @@ const periodInsightsController = {
         req.body?.responseSchema && typeof req.body.responseSchema === "object"
           ? req.body.responseSchema
           : null;
-      if (!empty && !responseSchema) {
-        // Only parsed answers can be stored as cards; without a schema there
-        // would be nothing to put in `items`.
-        return res.status(400).json({ error: "SCHEMA_REQUIRED" });
-      }
-
-      /** A small note of the figures behind the answer, for later explanation. */
-      const basis =
-        req.body?.basis && typeof req.body.basis === "object"
-          ? Object.fromEntries(Object.entries(req.body.basis).slice(0, MAX_BASIS_KEYS))
-          : null;
+      if (!responseSchema) return res.status(400).json({ error: "SCHEMA_REQUIRED" });
 
       const settings = await AISettings.findOne({ businessId: req.businessId });
       const providerId = settings?.provider ?? DEFAULT_PROVIDER;
       const credentials = settings?.[providerId];
 
-      // An empty period needs no key: nothing is going to be called.
-      if (!empty) {
-        if (!credentials?.apiKey) {
-          return res.status(424).json({ error: "NOT_CONFIGURED" });
-        }
-        if (!credentials.enabled) {
-          return res.status(424).json({ error: "AI_DISABLED" });
-        }
+      if (!credentials?.apiKey) {
+        return res.status(424).json({ error: "NOT_CONFIGURED" });
+      }
+      if (!credentials.enabled) {
+        return res.status(424).json({ error: "AI_DISABLED" });
       }
 
       req.generation = {
         section,
-        mode,
         promptVersion,
-        empty,
-        reason: empty ? (req.body?.reason ?? "NO_SALES") : null,
         briefing,
         systemInstruction,
         responseSchema,
-        basis,
         providerId,
         credentials,
         /** Cards already on screen, so a further batch does not repeat them. */
@@ -295,54 +314,44 @@ const periodInsightsController = {
     }
   },
 
-  async generate(req, res) {
-    const { section, mode, promptVersion, empty } = req.generation;
-    const key = {
-      businessId: req.businessId,
-      period: req.period,
-      section,
-      promptVersion,
-    };
+  /**
+   * Ask the model, and return the answer without storing it.
+   *
+   * Why this is separate from storing: what a section finally shows is the
+   * model's answer *joined onto the period's own figures* — the item name, the
+   * current price and the numbers all come from the data, and the model supplies
+   * only the advice, keyed by an anonymised reference. That join happens in the
+   * caller, where the data is. Storing the raw answer would be storing something
+   * nobody can read back once those figures are gone.
+   *
+   * So the caller drafts, joins, and sends the finished cards to be kept.
+   *
+   * The paid answer is cached for a day under the same key, so the second half of
+   * that pair failing — a dropped connection, a restart, a bad deploy — costs a
+   * retry rather than another provider call.
+   */
+  async draft(req, res) {
+    const { section, promptVersion } = req.generation;
+    const mode = req.body?.mode ?? "ensure";
 
     try {
-      const existing = await aiInsightsStore.readSection(key);
+      const cacheKey = `draft:${req.period.kind}:${req.period.id}:${section}:${promptVersion}`;
 
-      // ── Nothing to do ────────────────────────────────────────────────────
-      // The whole point of storing: an answer that exists is returned, and the
-      // provider is not called. This is the normal path once a period is done.
-      if (mode === "ensure" && existing) {
-        return res.json({ data: { ...existing.formatted(), spent: false } });
-      }
-      if (mode === "more") {
-        if (!existing) return res.status(404).json({ error: "NOTHING_TO_EXTEND" });
-        if (existing.noMore) return res.status(409).json({ error: "NO_MORE_AVAILABLE" });
-        if (existing.batches >= MAX_BATCHES) {
-          return res.status(409).json({ error: "BATCH_LIMIT_REACHED" });
-        }
-      }
+      const cached = await AIInsightCache.findOne({
+        businessId: req.businessId,
+        cacheKey,
+        expiresAt: { $gt: new Date() },
+      }).lean();
 
-      // ── A period with no sales ───────────────────────────────────────────
-      if (empty) {
-        const stored = await aiInsightsStore.store(key, {
-          adminId: req.adminId,
-          periodStart: req.period.start,
-          periodEnd: req.period.end,
-          items: [],
-          extra: { reason: req.generation.reason },
-          basis: req.generation.basis,
-          model: null,
-          provider: null,
-          settingsModel: null,
-          generatedAt: new Date(),
+      // Only when nobody asked for a new one: a regeneration means "ask again",
+      // and serving an earlier draft would make the button appear to do nothing.
+      if (cached && mode === "ensure") {
+        return res.json({
+          data: { answer: cached.insights, model: cached.model, spent: false },
         });
-        return res.json({ data: { ...stored.formatted(), spent: false } });
       }
 
-      // ── Paid from here on ────────────────────────────────────────────────
-      // One generation at a time per section and period. A second caller waits
-      // on this one and gets the same answer rather than paying again.
       const lockKey = `${req.businessId}|${req.period.kind}|${req.period.id}|${section}|${promptVersion}|${mode}`;
-
       const { shared, result } = await runOnce(lockKey, () =>
         periodInsightsController.callProvider(req),
       );
@@ -351,7 +360,7 @@ const periodInsightsController = {
         console.warn(
           JSON.stringify({
             level: "warn",
-            event: "period_insights.failed",
+            event: "period_insights.draft_failed",
             businessId: req.businessId,
             period: `${req.period.kind}:${req.period.id}`,
             section,
@@ -379,65 +388,181 @@ const periodInsightsController = {
         });
       }
 
-      const { items, extra } = splitAnswer(result.insights);
       const generatedAt = new Date();
-      const written = {
-        model: result.model,
-        provider: req.generation.providerId,
-        settingsModel: signatureOf(req.generation.providerId, req.generation.credentials),
-        generatedAt,
-      };
-
-      let stored;
-      if (mode === "more") {
-        // Cards already present are dropped rather than shown twice: the model
-        // is told what to avoid, but being told is not the same as obeying.
-        const seen = new Set(existing.items.map((item) => item?.id).filter(Boolean));
-        const fresh = items.filter((item) => !item?.id || !seen.has(item.id));
-        stored = await aiInsightsStore.appendItems(key, {
-          items: fresh,
-          model: result.model,
-          generatedAt,
-          // Nothing new means the model has run out; asking again would pay for
-          // the same silence.
-          noMore: fresh.length === 0,
-        });
-      } else if (existing) {
-        stored = await aiInsightsStore.replace(key, { items, extra, basis: req.generation.basis, ...written });
-      } else {
-        stored = await aiInsightsStore.store(key, {
-          adminId: req.adminId,
-          periodStart: req.period.start,
-          periodEnd: req.period.end,
-          items,
-          extra,
-          basis: req.generation.basis,
-          ...written,
-        });
+      try {
+        await AIInsightCache.findOneAndUpdate(
+          { businessId: req.businessId, cacheKey },
+          {
+            adminId: req.adminId,
+            insights: result.insights,
+            model: result.model,
+            settingsModel: signatureOf(
+              req.generation.providerId,
+              req.generation.credentials,
+            ),
+            generatedAt,
+            expiresAt: new Date(generatedAt.getTime() + DRAFT_TTL_MS),
+          },
+          { upsert: true },
+        );
+      } catch (error) {
+        // A cache write failing must not lose the answer that was just paid for:
+        // it is in the reply either way.
+        console.warn(`[period-insights] draft cache write failed: ${error?.message}`);
       }
 
       console.info(
         JSON.stringify({
           level: "info",
-          event: "period_insights.generated",
+          event: "period_insights.drafted",
           businessId: req.businessId,
           period: `${req.period.kind}:${req.period.id}`,
           section,
           mode,
           model: result.model,
           usage: result.usage,
-          // True when this request joined a generation already running, so the
-          // answer was not paid for twice.
           shared,
         }),
       );
 
-      res.json({ data: { ...stored.formatted(), spent: !shared, shared } });
+      res.json({
+        data: {
+          answer: result.insights,
+          model: result.model,
+          usage: result.usage,
+          provider: req.generation.providerId,
+          settingsModel: signatureOf(
+            req.generation.providerId,
+            req.generation.credentials,
+          ),
+          spent: !shared,
+          shared,
+        },
+      });
     } catch (err) {
       if (res.headersSent) {
         console.error("[error]", err?.message ?? err);
         return;
       }
+      internalError(res, err);
+    }
+  },
+
+  /**
+   * Keep the finished cards — the second half of a generation, and the only part
+   * a later visit reads.
+   *
+   * `items` are the cards as the caller resolved them, never the model's raw
+   * answer. A period with no sales is stored the same way, with `empty: true`,
+   * and no provider is ever called for it.
+   */
+  async save(req, res) {
+    try {
+      const { section } = req.params;
+      if (!isSectionName(section) || !isPeriodSection(section)) {
+        return res.status(400).json({ error: "INVALID_SECTION" });
+      }
+
+      const promptVersion = req.body?.promptVersion;
+      if (!isPromptVersion(promptVersion)) {
+        return res.status(400).json({ error: "INVALID_PROMPT_VERSION" });
+      }
+
+      const mode = req.body?.mode ?? "ensure";
+      if (!["ensure", "regenerate", "more"].includes(mode)) {
+        return res.status(400).json({ error: "INVALID_MODE" });
+      }
+      if (mode === "more" && !supportsMore(section)) {
+        return res.status(400).json({ error: "MORE_NOT_SUPPORTED" });
+      }
+
+      /**
+       * A period with nothing in it.
+       *
+       * The caller knows — it read the reports. Stored as an answer so the page
+       * can say "no sales in September" and never ask again, and nothing is paid
+       * for, because with no figures a model can only invent.
+       */
+      const empty = req.body?.empty === true;
+
+      const items = Array.isArray(req.body?.items) ? req.body.items : null;
+      if (!empty && !items) return res.status(400).json({ error: "ITEMS_REQUIRED" });
+
+      const extra =
+        req.body?.extra && typeof req.body.extra === "object" ? req.body.extra : null;
+      const basis =
+        req.body?.basis && typeof req.body.basis === "object"
+          ? Object.fromEntries(Object.entries(req.body.basis).slice(0, MAX_BASIS_KEYS))
+          : null;
+
+      const key = {
+        businessId: req.businessId,
+        period: req.period,
+        section,
+        promptVersion,
+      };
+      const existing = await aiInsightsStore.readSection(key);
+
+      if (mode === "more") {
+        if (!existing) return res.status(404).json({ error: "NOTHING_TO_EXTEND" });
+        if (existing.noMore) return res.status(409).json({ error: "NO_MORE_AVAILABLE" });
+        if (existing.batches >= MAX_BATCHES) {
+          return res.status(409).json({ error: "BATCH_LIMIT_REACHED" });
+        }
+
+        // Cards already present are dropped rather than shown twice: the model is
+        // told what to avoid, but being told is not the same as obeying.
+        const seen = new Set(existing.items.map((item) => item?.id).filter(Boolean));
+        const fresh = items.filter((item) => !item?.id || !seen.has(item.id));
+        const appended = await aiInsightsStore.appendItems(key, {
+          items: fresh,
+          model: req.body?.model ?? existing.model,
+          generatedAt: new Date(),
+          // Nothing new means the model has run out; asking again would pay for
+          // the same silence.
+          noMore: fresh.length === 0,
+        });
+        return res.json({ data: appended.formatted() });
+      }
+
+      const written = {
+        items: empty ? [] : items,
+        extra: empty
+          ? { reason: req.body?.reason ?? "NO_SALES", ...(extra ?? {}) }
+          : extra,
+        basis,
+        model: empty ? null : (req.body?.model ?? null),
+        provider: empty ? null : (req.body?.provider ?? null),
+        settingsModel: empty ? null : (req.body?.settingsModel ?? null),
+        generatedAt: new Date(),
+      };
+
+      const stored =
+        existing && mode === "regenerate"
+          ? await aiInsightsStore.replace(key, written)
+          : await aiInsightsStore.store(key, {
+              adminId: req.adminId,
+              periodStart: req.period.start,
+              periodEnd: req.period.end,
+              ...written,
+            });
+
+      console.info(
+        JSON.stringify({
+          level: "info",
+          event: "period_insights.saved",
+          businessId: req.businessId,
+          period: `${req.period.kind}:${req.period.id}`,
+          section,
+          mode,
+          empty,
+          items: stored.items.length,
+          revision: stored.revision,
+        }),
+      );
+
+      res.json({ data: stored.formatted() });
+    } catch (err) {
       internalError(res, err);
     }
   },

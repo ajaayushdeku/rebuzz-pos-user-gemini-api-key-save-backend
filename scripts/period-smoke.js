@@ -24,6 +24,7 @@
 const mongoose = require("mongoose");
 
 const AIInsights = require("../models/aiInsights");
+const AIInsightCache = require("../models/aiInsightCache");
 const { PERIOD_SECTIONS } = require("../helpers/insightSections");
 
 const BASE = process.env.SMOKE_BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
@@ -63,6 +64,34 @@ const api = async (method, path, body) => {
   return { status: res.status, body: await res.json().catch(() => ({})) };
 };
 
+/**
+ * Routes for the period under test.
+ *
+ * Module-level because `generate` below needs it, and the period is only known
+ * once the service has named its default — so it is assigned in `main`.
+ */
+let url = () => {
+  throw new Error("the period is not known yet");
+};
+
+/** The period under test, named by the service. Set in `main`. */
+let periodId = null;
+
+/**
+ * Put a section back to never-generated.
+ *
+ * Both halves, and that is the point: a paid draft is cached for a day so the
+ * save can be retried for free, so deleting only the stored insight leaves the
+ * next draft answering from that cache — and a check expecting a provider call
+ * then sees none. Every surprise in this script so far has been this.
+ */
+const resetSection = async (section) => {
+  await AIInsights.deleteOne({ section, promptVersion: PROMPT_VERSION });
+  await AIInsightCache.deleteMany({
+    cacheKey: `draft:month:${periodId}:${section}:${PROMPT_VERSION}`,
+  });
+};
+
 /** A believable briefing. The stub ignores it; the validation does not. */
 const briefingFor = (section, extra = "") =>
   `Section: ${section}. September 2026: 1,240 orders, Rs 310,000 revenue, ` +
@@ -76,6 +105,54 @@ const generateBody = (section, overrides = {}) => ({
   basis: { orders: 1240, revenue: 310000 },
   ...overrides,
 });
+
+/**
+ * One generation, as a section route performs it: draft, join, store.
+ *
+ * The join is the caller's job in the real flow — the model answers against an
+ * anonymised reference and the card's figures come from the period's own data —
+ * so this passes the drafted items straight through in its place. Everything
+ * around it is the sequence a section route will run.
+ */
+const generate = async (section, overrides = {}) => {
+  const mode = overrides.mode ?? "ensure";
+
+  // A period with no sales never reaches a provider: there is nothing to ask.
+  if (overrides.empty) {
+    const stored = await api("POST", url(`/${section}`), {
+      promptVersion: PROMPT_VERSION,
+      empty: true,
+      reason: overrides.reason ?? "NO_SALES",
+      basis: { orders: 0 },
+    });
+    // Nothing was asked of a provider, so nothing was spent.
+    if (stored.body?.data) stored.body.data.spent = false;
+    return stored;
+  }
+
+  const drafted = await api(
+    "POST",
+    url(`/${section}/draft`),
+    generateBody(section, overrides),
+  );
+  if (drafted.status !== 200) return drafted;
+
+  const answer = drafted.body?.data?.answer;
+  const saved = await api("POST", url(`/${section}`), {
+    promptVersion: overrides.promptVersion ?? PROMPT_VERSION,
+    mode,
+    items: Array.isArray(answer?.items) ? answer.items : [],
+    extra: answer?.windows ? { windows: answer.windows } : null,
+    model: drafted.body.data.model,
+    provider: drafted.body.data.provider,
+    settingsModel: drafted.body.data.settingsModel,
+    basis: { orders: 1240, revenue: 310000 },
+  });
+
+  // Carried through, so a caller can still tell whether this cost anything.
+  if (saved.body?.data) saved.body.data.spent = drafted.body.data.spent;
+  return saved;
+};
 
 /** Two at a time, as the real page will: free tiers refuse eight at once. */
 async function inPairs(items, work) {
@@ -118,11 +195,12 @@ async function main() {
     process.exit(1);
   }
   const period = periods.body.data.default;
+  periodId = period;
   console.log(`[smoke] default period: ${period} · ${periods.body.data.periods[0].label}`);
   check("12 months offered", periods.body.data.periods.length === 12);
   check("7 period sections", periods.body.data.totalSections === 7);
 
-  const url = (suffix = "") => `/api/period-insights/month/${period}${suffix}`;
+  url = (suffix = "") => `/api/period-insights/month/${period}${suffix}`;
 
   // ── Nothing stored yet ──────────────────────────────────────────────────
   const before = await api("GET", url());
@@ -130,9 +208,7 @@ async function main() {
   const alreadyThere = Object.keys(before.body.data?.sections ?? {}).length;
 
   // ── Generate every section, two at a time ───────────────────────────────
-  const generated = await inPairs(PERIOD_SECTIONS, (section) =>
-    api("POST", url(`/${section}`), generateBody(section)),
-  );
+  const generated = await inPairs(PERIOD_SECTIONS, (section) => generate(section));
   const ok = generated.filter((r) => r.status === 200);
   check(
     `generated ${PERIOD_SECTIONS.length} sections`,
@@ -146,25 +222,18 @@ async function main() {
   check("the basis was stored", ok[0]?.body?.data?.basis?.orders === 1240);
 
   // ── Asking again must not spend ─────────────────────────────────────────
-  const again = await api("POST", url("/pricing"), generateBody("pricing"));
+  const again = await generate("pricing");
   check("asking again returns the stored answer", again.body?.data?.spent === false);
   check("revision is still 1", again.body?.data?.revision === 1);
 
   // ── Two at once: the in-flight lock ─────────────────────────────────────
-  await AIInsights.deleteOne({ section: "retention", promptVersion: PROMPT_VERSION });
-  const [a, b] = await Promise.all([
-    api("POST", url("/retention"), generateBody("retention")),
-    api("POST", url("/retention"), generateBody("retention")),
-  ]);
+  await resetSection("retention");
+  const [a, b] = await Promise.all([generate("retention"), generate("retention")]);
   const spent = [a, b].filter((r) => r.body?.data?.spent === true).length;
   check("two simultaneous requests pay once", spent === 1, `${spent} marked spent`);
 
   // ── Regenerate ──────────────────────────────────────────────────────────
-  const regenerated = await api(
-    "POST",
-    url("/pricing"),
-    generateBody("pricing", { mode: "regenerate" }),
-  );
+  const regenerated = await generate("pricing", { mode: "regenerate" });
   check("regenerate bumps the revision", regenerated.body?.data?.revision === 2);
   check(
     "regenerate replaced the cards",
@@ -172,67 +241,46 @@ async function main() {
   );
 
   // ── Generate more ───────────────────────────────────────────────────────
-  const more = await api(
-    "POST",
-    url("/menu-suggestions"),
-    generateBody("menu-suggestions", { mode: "more" }),
-  );
+  const more = await generate("menu-suggestions", { mode: "more" });
   check("more adds a batch", more.body?.data?.batches === 2, `batches=${more.body?.data?.batches}`);
   check("more keeps the earlier cards", (more.body?.data?.items?.length ?? 0) > 2);
 
-  const notAllowed = await api(
-    "POST",
-    url("/pricing"),
-    generateBody("pricing", { mode: "more" }),
-  );
+  const notAllowed = await generate("pricing", { mode: "more" });
   check("more is refused where it makes no sense", notAllowed.body?.error === "MORE_NOT_SUPPORTED");
 
   // ── A period with no sales ──────────────────────────────────────────────
-  await AIInsights.deleteOne({ section: "staffing", promptVersion: PROMPT_VERSION });
-  const empty = await api("POST", url("/staffing"), {
-    promptVersion: PROMPT_VERSION,
-    empty: true,
-    reason: "NO_SALES",
-    basis: { orders: 0 },
-  });
+  await resetSection("staffing");
+  const empty = await generate("staffing", { empty: true });
   check("an empty period is stored without spending", empty.body?.data?.spent === false);
   check("and records why", empty.body?.data?.reason === "NO_SALES");
 
   // ── Provider failures, on demand ────────────────────────────────────────
-  await AIInsights.deleteOne({ section: "slow-items", promptVersion: PROMPT_VERSION });
-  const limited = await api(
-    "POST",
-    url("/slow-items"),
-    generateBody("slow-items", { briefing: briefingFor("slow-items", " __FAIL:AI_RATE_LIMIT__") }),
-  );
+  await resetSection("slow-items");
+  const limited = await generate("slow-items", {
+    briefing: briefingFor("slow-items", " __FAIL:AI_RATE_LIMIT__"),
+  });
   check("a rate limit comes back as 502 + code", limited.status === 502 && limited.body?.error === "AI_RATE_LIMIT");
   check("with the provider's own sentence", Boolean(limited.body?.detail));
   check("and its timing", limited.body?.retryAfter === 42, `retryAfter=${limited.body?.retryAfter}`);
 
-  const malformed = await api(
-    "POST",
-    url("/slow-items"),
-    generateBody("slow-items", { briefing: briefingFor("slow-items", " __FAIL:MALFORMED__") }),
-  );
+  const malformed = await generate("slow-items", {
+    briefing: briefingFor("slow-items", " __FAIL:MALFORMED__"),
+  });
   check("a non-JSON answer is the model's failure", malformed.body?.error === "AI_MALFORMED_RESPONSE");
 
   // ── Refusals that cost nothing ──────────────────────────────────────────
   const openPeriod = new Date().toISOString().slice(0, 7);
   const notClosed = await api(
     "POST",
-    `/api/period-insights/month/${openPeriod}/pricing`,
+    `/api/period-insights/month/${openPeriod}/pricing/draft`,
     generateBody("pricing"),
   );
   check("an unfinished period is refused", notClosed.body?.error === "PERIOD_NOT_CLOSED");
 
-  const badSection = await api("POST", url("/festival-prep"), generateBody("festival-prep"));
+  const badSection = await generate("festival-prep");
   check("festival-prep is not a period section", badSection.body?.error === "INVALID_SECTION");
 
-  const badVersion = await api(
-    "POST",
-    url("/pricing"),
-    generateBody("pricing", { promptVersion: "newest" }),
-  );
+  const badVersion = await generate("pricing", { promptVersion: "newest" });
   check("a junk prompt version is refused", badVersion.body?.error === "INVALID_PROMPT_VERSION");
 
   // ── The page's read ─────────────────────────────────────────────────────
@@ -254,7 +302,13 @@ async function cleanup() {
     return;
   }
   const { deletedCount } = await AIInsights.deleteMany({ promptVersion: PROMPT_VERSION });
-  console.log(`[smoke] cleaned up ${deletedCount} stub documents`);
+  // The cached drafts too, or tomorrow's run would answer from today's.
+  const drafts = await AIInsightCache.deleteMany({
+    cacheKey: { $regex: `:${PROMPT_VERSION}$` },
+  });
+  console.log(
+    `[smoke] cleaned up ${deletedCount} stub documents and ${drafts.deletedCount} drafts`,
+  );
 }
 
 (async () => {

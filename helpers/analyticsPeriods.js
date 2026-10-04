@@ -167,7 +167,7 @@ const isPeriodKind = (value) =>
  * endpoints take. `end` is the last instant of the period, for display; queries
  * should use `start <= t < endExclusive`.
  */
-function describePeriod(kind, id, now = new Date()) {
+function describePeriod(kind, id, now = new Date(), { withPrevious = true } = {}) {
   if (!isPeriodKind(kind)) return null;
 
   const bounds = KINDS[kind].bounds(String(id ?? ""));
@@ -175,6 +175,28 @@ function describePeriod(kind, id, now = new Date()) {
 
   const start = nepalMidnight(...bounds.start);
   const endExclusive = nepalMidnight(...bounds.endExclusive);
+
+  /**
+   * The period before this one, of the same kind.
+   *
+   * Every section compares a period against what came before it — "momo sales
+   * up 12%" needs a baseline — and the baseline has to be the same shape: the
+   * month before a month, the quarter before a quarter. Calculated here rather
+   * than by the caller, so there is one calendar and the comparison can never
+   * be against a window of a different length.
+   *
+   * `withPrevious: false` stops the recursion; nothing needs the previous
+   * period's previous period.
+   */
+  const previous = withPrevious
+    ? (() => {
+        const [year, month] = bounds.start;
+        const stepped = KINDS[kind].step({ year, month }, -1);
+        return describePeriod(kind, KINDS[kind].idFor(stepped), now, {
+          withPrevious: false,
+        });
+      })()
+    : null;
 
   return {
     kind,
@@ -185,6 +207,9 @@ function describePeriod(kind, id, now = new Date()) {
     end: new Date(endExclusive.getTime() - 1),
     from: nepalDateString(start),
     to: nepalDateString(new Date(endExclusive.getTime() - 1)),
+    ...(previous
+      ? { previous: { id: previous.id, from: previous.from, to: previous.to } }
+      : {}),
     /**
      * Whether the period is over in Nepal.
      *
