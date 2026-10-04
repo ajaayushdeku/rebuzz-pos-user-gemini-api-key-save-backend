@@ -1,44 +1,27 @@
 const express = require("express");
 const router = express.Router();
 const requireBusiness = require("../../middlewares/requireBusiness");
-const { insightsRateLimit } = require("../../middlewares/aiRateLimit");
 const { aiInsightsController } = require("../../controller/aiInsightsController");
 
 /**
- * One limiter for the route, created once. Built per request, every call would
- * get a fresh empty bucket and nothing would ever be limited. A refused
- * request is answered with the last insight there is, where there is one.
- */
-const quotaGuard = insightsRateLimit((req, res) =>
-  aiInsightsController.serveLastAnswer(req, res, "INSIGHTS_RATE_LIMIT"),
-);
-
-/**
- * What is left of the hour, without spending any of it.
+ * The hourly limiter and `GET /quota` are gone.
  *
- * The settings screen shows the allowance before anything is generated, and
- * nothing else on the page would tell it — the headers below only ride along
- * with an insights request.
- */
-router.get("/quota", requireBusiness, (req, res) => {
-  res.json({ status: "success", data: quotaGuard.snapshot(req) });
-});
-
-/**
- * In order: report the allowance, refuse what costs nothing, answer from the
- * cache, then count against the hour. Only a request that gets past all of it
- * reaches the provider.
+ * The limiter was a cost guard for a page that generated on every visit. That
+ * page now reads stored answers instead, and the one thing worth guarding —
+ * paying twice for the same generation — is handled by the in-flight lock in
+ * `helpers/inFlight.js`, which serves the second caller the same answer rather
+ * than refusing it.
  *
- * `peek` runs before the cache so every answer carries the rate-limit headers,
- * including the cached ones that cost no quota at all.
+ * `/quota` went with it: it only ever reported this limiter's buckets, so with
+ * no limiter there is nothing for it to report. A provider's own limits are
+ * reported where they happen, on the failure itself, with `detail` and
+ * `retryAfter`.
  */
 router.post(
   "/",
   requireBusiness,
-  quotaGuard.peek,
   aiInsightsController.prepare,
   aiInsightsController.serveCached,
-  quotaGuard,
   aiInsightsController.generate,
 );
 

@@ -71,6 +71,31 @@ function normalizeError(status, message = "") {
 }
 
 /**
+ * How long the provider asked us to wait, in seconds, or null.
+ *
+ * Worth passing on because it is the one thing that turns "try again later" into
+ * a sentence a user can act on. `Retry-After` is either seconds or an HTTP date;
+ * both are allowed and providers use both.
+ *
+ * Capped at an hour: a provider that asks for a day is really saying the daily
+ * allowance is gone, and a countdown of 23 hours is not useful in a card.
+ */
+function retryAfterOf(res) {
+  const raw = res?.headers?.get?.("retry-after");
+  if (!raw) return null;
+
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) {
+    return seconds > 0 ? Math.min(Math.ceil(seconds), 3600) : null;
+  }
+
+  const until = Date.parse(raw);
+  if (Number.isNaN(until)) return null;
+  const wait = Math.ceil((until - Date.now()) / 1000);
+  return wait > 0 ? Math.min(wait, 3600) : null;
+}
+
+/**
  * The message a provider puts in a failure, without the rest of the body.
  *
  * Three shapes, because "OpenAI-compatible" stops at the happy path: OpenAI
@@ -309,9 +334,16 @@ function createOpenAiCompatibleProvider({
     }
 
     if (!res.ok) {
+      // `detail` and `retryAfter` travel with the failure: a card that can say
+      // "your plan's limit — try again in 42s, or pick another model" is worth
+      // the two extra fields, and this is the only place that knows them.
+      const upstream = errorMessageOf(json);
+      const retryAfter = retryAfterOf(res);
       return {
         ok: false,
-        error: normalizeError(res.status, errorMessageOf(json)),
+        error: normalizeError(res.status, upstream),
+        ...(upstream ? { detail: upstream.slice(0, 200) } : {}),
+        ...(retryAfter ? { retryAfter } : {}),
       };
     }
 

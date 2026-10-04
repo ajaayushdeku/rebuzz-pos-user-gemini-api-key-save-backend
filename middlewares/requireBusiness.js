@@ -12,6 +12,24 @@ const POS_API_URL = process.env.POS_API_URL;
  * Inside khajaGharBackend this whole middleware is replaced by
  * JWT.sessionRequired plus a Business lookup on the tenant admin id.
  */
+/**
+ * The `userId` inside an already-verified token, or null.
+ *
+ * Decode only — no signature check, and deliberately no dependency on a JWT
+ * library for it. See where it is called for why that is sound here.
+ */
+const tokenSubject = (token) => {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(token.split(".")[1], "base64url").toString("utf8"),
+    );
+    const subject = payload?.userId ?? payload?.sub ?? null;
+    return subject ? String(subject) : null;
+  } catch {
+    return null;
+  }
+};
+
 const requireBusiness = async (req, res, next) => {
   const header = req.get("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
@@ -62,6 +80,20 @@ const requireBusiness = async (req, res, next) => {
   req.adminId = String(adminId);
   // Kept for the insights route, which reads POS analytics as this user.
   req.posToken = token;
+  /**
+   * Who is calling, for the checks that care — `requireAdmin` compares this
+   * with `adminId`.
+   *
+   * Read from the token's payload without verifying the signature, which is
+   * safe only because of the order this happens in: the POS API was just asked
+   * about this exact token and accepted it, so the payload has already been
+   * verified by the service that owns the secret. This service has no secret
+   * and must never be the thing that decides a token is genuine.
+   *
+   * Null when the token is not a JWT or carries no subject. A caller is then
+   * simply not identified, which `requireAdmin` treats as "not the admin".
+   */
+  req.userId = tokenSubject(token);
   next();
 };
 

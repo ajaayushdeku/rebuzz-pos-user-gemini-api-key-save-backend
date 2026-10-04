@@ -23,6 +23,18 @@ function assertConfigured() {
   }
   assertEncryptionReady();
 
+  /**
+   * The stub provider is a development tool, and a silent one — its answers look
+   * like answers. Running it in production would mean merchants reading invented
+   * advice with no sign that anything was wrong, so this refuses to start rather
+   * than warning about it.
+   */
+  if (process.env.AI_STUB_PROVIDER === "1" && process.env.NODE_ENV === "production") {
+    throw new Error(
+      "AI_STUB_PROVIDER=1 in production: every insight would be fabricated. Remove it.",
+    );
+  }
+
   // CORS_ORIGIN is where the frontend runs. It is inert while the only caller
   // is the Next.js proxy (server-to-server fetches send no Origin header), but
   // a browser calling this service directly with the fallback still set gets a
@@ -75,7 +87,10 @@ app.use((req, res, next) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+  // `stub` is here so a tool can ask the server what it is rather than guessing
+  // from its own environment — scripts/period-smoke.js refuses to run against a
+  // server that would spend real money.
+  res.json({ ok: true, stub: process.env.AI_STUB_PROVIDER === "1" });
 });
 
 app.use("/api", ApiRouter);

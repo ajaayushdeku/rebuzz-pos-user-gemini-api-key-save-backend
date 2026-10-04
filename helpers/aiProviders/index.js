@@ -108,6 +108,17 @@ const PROVIDERS = {
   },
 };
 
+/**
+ * Local development without spending anything.
+ *
+ * Applied here rather than at the call sites so every route, not just the
+ * insights one, behaves consistently — including the settings screen's key
+ * verification, which would otherwise still make real calls.
+ */
+if (process.env.AI_STUB_PROVIDER === "1") {
+  require("./stub").applyStub(PROVIDERS);
+}
+
 /** The provider ids, for validating what arrives from a request. */
 const PROVIDER_IDS = Object.keys(PROVIDERS);
 
