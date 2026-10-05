@@ -208,7 +208,17 @@ function describePeriod(kind, id, now = new Date(), { withPrevious = true } = {}
     from: nepalDateString(start),
     to: nepalDateString(new Date(endExclusive.getTime() - 1)),
     ...(previous
-      ? { previous: { id: previous.id, from: previous.from, to: previous.to } }
+      ? {
+          previous: {
+            id: previous.id,
+            // The label too: cards comparing two periods say "September 2026
+            // against August 2026", and deriving that name again on the client
+            // would be a second calendar to keep in step.
+            label: previous.label,
+            from: previous.from,
+            to: previous.to,
+          },
+        }
       : {}),
     /**
      * Whether the period is over in Nepal.
