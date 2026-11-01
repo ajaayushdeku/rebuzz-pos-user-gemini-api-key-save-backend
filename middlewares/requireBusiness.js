@@ -9,7 +9,7 @@ const POS_API_URL = process.env.POS_API_URL;
  * and never from the request body — a client-supplied id would let any
  * authenticated business read and spend another's key.
  *
- * Inside khajaGharBackend this whole middleware is replaced by
+ * Inside khajaGharBackend  this whole middleware is replaced by
  * JWT.sessionRequired plus a Business lookup on the tenant admin id.
  */
 /**
