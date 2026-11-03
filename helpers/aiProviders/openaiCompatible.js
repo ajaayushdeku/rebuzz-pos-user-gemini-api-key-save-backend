@@ -47,7 +47,11 @@ function normalizeError(status, message = "") {
   // as free tiers sometimes do. Checked first, whatever the status: it is
   // neither a bad key nor a limit, and waiting or trying other models will not
   // change it.
-  if (/payment method|add (a|your) (card|payment)|billing (details|info)/.test(text)) {
+  if (
+    /payment method|add (a|your) (card|payment)|billing (details|info)/.test(
+      text,
+    )
+  ) {
     return "AI_PAYMENT_REQUIRED";
   }
 
@@ -257,7 +261,9 @@ function createOpenAiCompatibleProvider({
 
       if (!res.ok) {
         const code = normalizeError(res.status, errorMessageOf(json));
-        console.warn(`[${id}] list models failed code=${code} status=${res.status}`);
+        console.warn(
+          `[${id}] list models failed code=${code} status=${res.status}`,
+        );
         return { ok: false, error: code };
       }
 
@@ -348,7 +354,12 @@ function createOpenAiCompatibleProvider({
     }
 
     const choice = json?.choices?.[0];
-    const text = String(choice?.message?.content ?? "");
+    // const text = String(choice?.message?.content ?? "");
+    const content = choice?.message?.content;
+
+    const text = Array.isArray(content)
+      ? content.map((part) => part?.text ?? "").join("")
+      : String(content ?? "");
 
     // Reported as what it is: a reply that hit the ceiling is half a JSON
     // document, and calling that a "format" problem sends anyone investigating
@@ -432,7 +443,13 @@ function createOpenAiCompatibleProvider({
     return { ok: false, error: lastError };
   }
 
-  return { verifyKey, listModels, suggestModels, generateInsights, defaultModel };
+  return {
+    verifyKey,
+    listModels,
+    suggestModels,
+    generateInsights,
+    defaultModel,
+  };
 }
 
 module.exports = { toStrictSchema, createOpenAiCompatibleProvider };

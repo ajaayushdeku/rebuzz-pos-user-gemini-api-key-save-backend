@@ -35,20 +35,70 @@ const nvidia = require("./nvidia");
  * and its own retry set, and a provider that predates the neutral vocabulary
  * is exactly the thing an adapter is for.
  */
-const neutral = (code) =>
-  typeof code === "string" ? code.replace(/^GEMINI_/, "AI_") : "AI_UNAVAILABLE";
-
-const translate = async (promise) => {
-  const result = await promise;
-  return result?.ok ? result : { ...result, error: neutral(result?.error) };
+// const neutral = (code) =>
+//   typeof code === "string" ? code.replace(/^GEMINI_/, "AI_") : "AI_UNAVAILABLE";
+const GEMINI_ERROR_MAP = {
+  GEMINI_KEY_INVALID: "AI_KEY_INVALID",
+  GEMINI_QUOTA_EXCEEDED: "AI_QUOTA_EXCEEDED",
+  GEMINI_RATE_LIMIT: "AI_RATE_LIMIT",
+  GEMINI_MODEL_UNAVAILABLE: "AI_MODEL_UNAVAILABLE",
+  GEMINI_UNAVAILABLE: "AI_UNAVAILABLE",
+  GEMINI_TRUNCATED: "AI_TRUNCATED",
+  GEMINI_EMPTY_RESPONSE: "AI_EMPTY_RESPONSE",
+  GEMINI_MALFORMED_RESPONSE: "AI_MALFORMED_RESPONSE",
 };
 
+const neutral = (code) => {
+  if (typeof code !== "string") {
+    return "AI_UNAVAILABLE";
+  }
+
+  return GEMINI_ERROR_MAP[code] || "AI_UNAVAILABLE";
+};
+
+// const translate = async (promise) => {
+//   const result = await promise;
+//   return result?.ok ? result : { ...result, error: neutral(result?.error) };
+// };
+
+const translate = async (operation) => {
+  try {
+    const result = await operation();
+
+    if (result?.ok) {
+      return result;
+    }
+
+    return {
+      ...(result && typeof result === "object" ? result : {}),
+      ok: false,
+      error: neutral(result?.error),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: neutral(error?.code || error?.message),
+    };
+  }
+};
+
+// const gemini = {
+//   verifyKey: (apiKey, model) => translate(verifyGeminiKey(apiKey, model)),
+//   listModels: (apiKey) => translate(geminiListModels(apiKey)),
+//   suggestModels: geminiSuggest,
+//   generateInsights: (apiKey, options) =>
+//     translate(geminiGenerate(apiKey, options)),
+// };
+
 const gemini = {
-  verifyKey: (apiKey, model) => translate(verifyGeminiKey(apiKey, model)),
-  listModels: (apiKey) => translate(geminiListModels(apiKey)),
+  verifyKey: (apiKey, model) => translate(() => verifyGeminiKey(apiKey, model)),
+
+  listModels: (apiKey) => translate(() => geminiListModels(apiKey)),
+
   suggestModels: geminiSuggest,
+
   generateInsights: (apiKey, options) =>
-    translate(geminiGenerate(apiKey, options)),
+    translate(() => geminiGenerate(apiKey, options)),
 };
 
 /**

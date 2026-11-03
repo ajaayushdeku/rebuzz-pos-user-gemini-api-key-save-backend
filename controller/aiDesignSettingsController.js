@@ -8,6 +8,22 @@ const internalError = (res, err) => {
   return res.status(500).json({ error: "INTERNAL_ERROR" });
 };
 
+const openAIErrorStatus = (error) => {
+  const statusMap = {
+    OPENAI_INVALID_API_KEY: 400,
+    OPENAI_PERMISSION_DENIED: 403,
+    OPENAI_QUOTA_EXCEEDED: 429,
+    OPENAI_RATE_LIMITED: 429,
+    OPENAI_REQUEST_LIMIT_REACHED: 429,
+    OPENAI_RATE_OR_QUOTA_LIMIT: 429,
+    OPENAI_REQUEST_TIMEOUT: 504,
+    OPENAI_SERVICE_UNAVAILABLE: 503,
+    OPENAI_CONNECTION_FAILED: 502,
+  };
+
+  return statusMap[error] || 502;
+};
+
 const getImageSettings = (settings) => {
   const credentials = settings?.openaiImage;
 
@@ -51,15 +67,14 @@ const aiDesignSettingsController = {
       const check = await verifyOpenAIKey(apiKey);
 
       if (!check.ok) {
-        const status =
-          check.error === "OPENAI_INVALID_API_KEY" ? 400 :
-          check.error === "OPENAI_PERMISSION_DENIED" ? 403 :
-          check.error === "OPENAI_RATE_OR_QUOTA_LIMIT" ? 429 :
-          check.error === "OPENAI_REQUEST_TIMEOUT" ? 504 :
-          502;
-
-        return res.status(status).json({
+        console.warn("[ai-design-key-verification]", {
           error: check.error,
+          requestId: check.requestId ?? null,
+        });
+
+        return res.status(openAIErrorStatus(check.error)).json({
+          error: check.error,
+          requestId: check.requestId,
         });
       }
 
@@ -120,15 +135,14 @@ const aiDesignSettingsController = {
       const check = await verifyOpenAIKey(apiKey);
 
       if (!check.ok) {
-        const status =
-          check.error === "OPENAI_INVALID_API_KEY" ? 400 :
-          check.error === "OPENAI_PERMISSION_DENIED" ? 403 :
-          check.error === "OPENAI_RATE_OR_QUOTA_LIMIT" ? 429 :
-          check.error === "OPENAI_REQUEST_TIMEOUT" ? 504 :
-          502;
-
-        return res.status(status).json({
+        console.warn("[ai-design-key-verification]", {
           error: check.error,
+          requestId: check.requestId ?? null,
+        });
+
+        return res.status(openAIErrorStatus(check.error)).json({
+          error: check.error,
+          requestId: check.requestId,
         });
       }
 

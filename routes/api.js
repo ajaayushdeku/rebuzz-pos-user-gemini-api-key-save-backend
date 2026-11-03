@@ -7,6 +7,7 @@ router.use("/ai-insights", require("../api/business/aiInsights"));
 // Period insights: own prefix, so the day-scoped route above keeps its exact
 // contract for the sales forecast and the offer scheduler.
 router.use("/period-insights", require("../api/business/periodInsights"));
-router.use("/ai-design/settings",require("../api/business/aiDesignSettings"))
+router.use("/ai-design/settings", require("../api/business/aiDesignSettings"));
+router.use("/ai-design", require("../api/business/aiDesign"));
 
 module.exports = router;
