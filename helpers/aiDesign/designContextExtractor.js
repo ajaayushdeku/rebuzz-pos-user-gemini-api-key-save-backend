@@ -1,15 +1,8 @@
 const { AISettings } = require("../../models");
 const { decrypt } = require("../aiCrypto");
-const {
-  classifyOpenAI429Error,
-  openAIRequestFailure,
-} = require("./openaiErrors");
+const { generateCloudflareText } = require("./cloudflareClient");
 
-const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-
-const DEFAULT_TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || "gpt-6-luna";
-
-const OPENAI_REQUEST_TIMEOUT_MS = 60000;
+const DEFAULT_TEXT_MODEL = "@cf/zai-org/glm-4.7-flash";
 
 const MAX_PROMPT_LENGTH = 6000;
 const MAX_REQUIRED_TEXT_ITEMS = 30;
@@ -38,39 +31,19 @@ const DESIGN_CONTEXT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    designType: {
-      type: "string",
-    },
-    platform: {
-      type: "string",
-    },
-    dimensions: {
-      type: "string",
-    },
-    style: {
-      type: "string",
-    },
-    targetAudience: {
-      type: "string",
-    },
-    brandName: {
-      type: "string",
-    },
+    designType: { type: "string" },
+    platform: { type: "string" },
+    dimensions: { type: "string" },
+    style: { type: "string" },
+    targetAudience: { type: "string" },
+    brandName: { type: "string" },
     requiredText: {
       type: "array",
-      items: {
-        type: "string",
-      },
+      items: { type: "string" },
     },
-    additionalInstructions: {
-      type: "string",
-    },
-    needsClarification: {
-      type: "boolean",
-    },
-    followUpQuestion: {
-      type: "string",
-    },
+    additionalInstructions: { type: "string" },
+    needsClarification: { type: "boolean" },
+    followUpQuestion: { type: "string" },
   },
   required: [
     "designType",
@@ -258,6 +231,12 @@ const parseDesignContext = (value) => {
   let parsed = value;
 
   if (typeof parsed === "string") {
+    // Remove optional Markdown code fences if the model includes them.
+    parsed = parsed
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/, "")
+      .trim();
+
     try {
       parsed = JSON.parse(parsed);
     } catch {
@@ -488,8 +467,7 @@ const mergeDesignContext = (
     designOptions.requiredText,
   );
 
-  // These fields determine whether the UI should ask another question or
-  // present the brief for confirmation. Preserve the latest extraction result.
+  // Preserve the latest extraction's clarification decision.
   merged.needsClarification = extractedContext.needsClarification;
   merged.followUpQuestion = extractedContext.followUpQuestion || "";
 
@@ -524,187 +502,94 @@ const buildDesignBriefing = ({
   };
 };
 
-const extractOutputText = (response) => {
-  if (!Array.isArray(response?.output)) {
-    return "";
-  }
+const buildSystemInstruction = () => {
+  return `${SYSTEM_INSTRUCTION}
 
-  const textParts = [];
+You MUST return a valid JSON object matching this exact JSON schema:
 
-  for (const item of response.output) {
-    if (item?.type === "message" && Array.isArray(item.content)) {
-      for (const content of item.content) {
-        if (content?.type === "output_text" && content.text) {
-          textParts.push(content.text);
-        }
-      }
-    }
-  }
+${JSON.stringify(DESIGN_CONTEXT_SCHEMA, null, 2)}
 
-  return textParts.join("\n").trim();
-};
-
-const getOpenAIError = (status, result) => {
-  const rateLimitError = classifyOpenAI429Error({ status }, result);
-
-  if (rateLimitError) {
-    return rateLimitError;
-  }
-
-  const type = result?.error?.type;
-
-  if (status === 401) {
-    return "OPENAI_INVALID_API_KEY";
-  }
-
-  if (status === 403) {
-    return "OPENAI_PERMISSION_DENIED";
-  }
-
-  if (status === 408 || status === 504) {
-    return "OPENAI_TEXT_REQUEST_TIMEOUT";
-  }
-
-  if (status === 404) {
-    return "OPENAI_TEXT_MODEL_UNAVAILABLE";
-  }
-
-  if (status >= 500) {
-    return "OPENAI_SERVICE_UNAVAILABLE";
-  }
-
-  if (type === "server_error") {
-    return "OPENAI_SERVICE_UNAVAILABLE";
-  }
-
-  return "OPENAI_TEXT_EXTRACTION_FAILED";
+Important:
+- Return JSON only.
+- Do not include Markdown code fences.
+- Do not include explanations before or after the JSON.
+- Include every required property.
+- Use the correct data types for every property.
+- Do not add properties that are not in the schema.
+`;
 };
 
 /**
- * Call OpenAI Responses API to extract structured design context.
+ * Extract structured design context using Cloudflare Workers AI.
  */
-const requestDesignContext = async (apiKey, briefing) => {
-  let response;
+const requestDesignContext = async (credentials, briefing, model) => {
+  let result;
 
   try {
-    response = await fetch(OPENAI_RESPONSES_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: DEFAULT_TEXT_MODEL,
-        instructions: SYSTEM_INSTRUCTION,
-        input: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: briefing,
-              },
-            ],
-          },
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "design_context",
-            strict: true,
-            schema: DESIGN_CONTEXT_SCHEMA,
-          },
+    result = await generateCloudflareText(
+      credentials,
+      [
+        {
+          role: "system",
+          content: buildSystemInstruction(),
         },
-      }),
-      signal: AbortSignal.timeout(OPENAI_REQUEST_TIMEOUT_MS),
-    });
+        {
+          role: "user",
+          content: briefing,
+        },
+      ],
+      {
+        model,
+        maxTokens: 2500,
+        temperature: 0.1,
+      },
+    );
   } catch (error) {
-    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-      return {
-        ok: false,
-        error: "OPENAI_TEXT_REQUEST_TIMEOUT",
-      };
-    }
-
-    console.error("[openai-design-context-request]", {
+    console.error("[cloudflare-design-context-request]", {
+      code: error?.code || null,
+      status: error?.status || null,
       name: error?.name || "UnknownError",
     });
 
     return {
       ok: false,
-      error: "OPENAI_CONNECTION_FAILED",
+      error: error?.code || "CLOUDFLARE_TEXT_EXTRACTION_FAILED",
     };
   }
 
-  let result;
-
-  try {
-    result = await response.json();
-  } catch {
-    return openAIRequestFailure(response, "OPENAI_INVALID_RESPONSE");
-  }
-
-  if (!response.ok) {
-    const failure = openAIRequestFailure(
-      response,
-      getOpenAIError(response.status, result),
-    );
-
-    console.warn("[openai-design-context-response]", {
-      status: response.status,
-      providerCode: result?.error?.code ?? null,
-      providerType: result?.error?.type ?? null,
-      error: failure.error,
-      requestId: failure.requestId ?? null,
-    });
-
-    return failure;
-  }
-
-  if (result?.status === "incomplete") {
-    return {
-      ok: false,
-      error: "OPENAI_INCOMPLETE_RESPONSE",
-    };
-  }
-
-  const refusal = result?.output?.some((item) =>
-    item?.content?.some((content) => content?.type === "refusal"),
-  );
-
-  if (refusal) {
-    return {
-      ok: false,
-      error: "OPENAI_DESIGN_REQUEST_REFUSED",
-    };
-  }
-
-  const outputText = extractOutputText(result);
+  const outputText =
+    typeof result?.content === "string" ? result.content.trim() : "";
 
   if (!outputText) {
     return {
       ok: false,
-      error: "OPENAI_EMPTY_TEXT_RESPONSE",
+      error: "CLOUDFLARE_EMPTY_TEXT_RESPONSE",
     };
   }
 
   const parsed = parseDesignContext(outputText);
 
   if (!parsed.ok) {
+    console.warn("[cloudflare-design-context-parse]", {
+      error: parsed.error,
+      model: result?.model || model,
+    });
+
     return {
       ok: false,
-      error: parsed.error,
+      error: "CLOUDFLARE_INVALID_DESIGN_CONTEXT",
     };
   }
 
   return {
     ok: true,
     value: parsed.value,
+    model: result?.model || model,
   };
 };
 
 /**
- * Extract structured design context using OpenAI.
+ * Extract structured design context using Cloudflare Workers AI.
  *
  * @param {object} params
  * @param {string} params.businessId
@@ -722,20 +607,12 @@ const extractDesignContext = async ({
   previousContext = null,
   designOptions = {},
 }) => {
-  // ---------------------------------------------
-  // VALIDATE BUSINESS
-  // ---------------------------------------------
-
   if (typeof businessId !== "string" || !businessId.trim()) {
     return {
       ok: false,
       error: "BUSINESS_ID_REQUIRED",
     };
   }
-
-  // ---------------------------------------------
-  // VALIDATE PROMPT
-  // ---------------------------------------------
 
   if (typeof prompt !== "string" || !prompt.trim()) {
     return {
@@ -753,19 +630,11 @@ const extractDesignContext = async ({
     };
   }
 
-  // ---------------------------------------------
-  // VALIDATE DESIGN OPTIONS
-  // ---------------------------------------------
-
   const normalizedOptions = normalizeDesignOptions(designOptions);
 
   if (!normalizedOptions.ok) {
     return normalizedOptions;
   }
-
-  // ---------------------------------------------
-  // VALIDATE PREVIOUS CONTEXT
-  // ---------------------------------------------
 
   const normalizedPrevious = normalizePreviousContext(previousContext);
 
@@ -773,19 +642,11 @@ const extractDesignContext = async ({
     return normalizedPrevious;
   }
 
-  // ---------------------------------------------
-  // VALIDATE CONVERSATION HISTORY
-  // ---------------------------------------------
-
   const normalizedHistory = normalizeConversationHistory(conversationHistory);
 
   if (!normalizedHistory.ok) {
     return normalizedHistory;
   }
-
-  // ---------------------------------------------
-  // BUILD DESIGN BRIEFING
-  // ---------------------------------------------
 
   const briefing = buildDesignBriefing({
     prompt: normalizedPrompt,
@@ -799,7 +660,7 @@ const extractDesignContext = async ({
   }
 
   // ---------------------------------------------
-  // GET BUSINESS OPENAI SETTINGS
+  // GET BUSINESS CLOUDFLARE SETTINGS
   // ---------------------------------------------
 
   let settings;
@@ -826,66 +687,88 @@ const extractDesignContext = async ({
     };
   }
 
-  // AI Design uses the OpenAI configuration directly.
-  // Other AI features can continue using their existing providers.
-  const credentials = settings.openaiImage;
+  const credentials = settings.cloudflareAI;
 
   if (!credentials?.enabled) {
     return {
       ok: false,
-      error: "OPENAI_NOT_ENABLED",
+      error: "CLOUDFLARE_NOT_ENABLED",
     };
   }
 
   // ---------------------------------------------
-  // VALIDATE ENCRYPTED API KEY
+  // VALIDATE ENCRYPTED CLOUDFLARE CREDENTIALS
   // ---------------------------------------------
 
-  const encryptedKey = credentials.apiKey;
+  const encryptedAccountId = credentials.accountId;
+  const encryptedApiToken = credentials.apiToken;
+
+  const isValidEncryptedValue = (value) =>
+    value &&
+    typeof value === "object" &&
+    value.ciphertext &&
+    value.iv &&
+    value.authTag;
 
   if (
-    !encryptedKey ||
-    typeof encryptedKey !== "object" ||
-    !encryptedKey.ciphertext ||
-    !encryptedKey.iv ||
-    !encryptedKey.authTag
+    !isValidEncryptedValue(encryptedAccountId) ||
+    !isValidEncryptedValue(encryptedApiToken)
   ) {
     return {
       ok: false,
-      error: "AI_KEY_MISSING",
+      error: "CLOUDFLARE_CREDENTIALS_MISSING",
     };
   }
 
   // ---------------------------------------------
-  // DECRYPT API KEY
+  // DECRYPT CLOUDFLARE CREDENTIALS
   // ---------------------------------------------
 
-  let apiKey;
+  let accountId;
+  let apiToken;
 
   try {
-    apiKey = decrypt(encryptedKey);
+    accountId = decrypt(encryptedAccountId);
+    apiToken = decrypt(encryptedApiToken);
 
-    if (typeof apiKey !== "string" || !apiKey.trim()) {
-      throw new Error("EMPTY_DECRYPTED_KEY");
+    if (
+      typeof accountId !== "string" ||
+      !accountId.trim() ||
+      typeof apiToken !== "string" ||
+      !apiToken.trim()
+    ) {
+      throw new Error("EMPTY_DECRYPTED_CREDENTIALS");
     }
 
-    apiKey = apiKey.trim();
+    accountId = accountId.trim();
+    apiToken = apiToken.trim();
   } catch (error) {
-    console.error("[design-context-key-decryption]", {
+    console.error("[design-context-credentials-decryption]", {
       name: error?.name || "UnknownError",
     });
 
     return {
       ok: false,
-      error: "AI_KEY_DECRYPTION_FAILED",
+      error: "CLOUDFLARE_CREDENTIALS_DECRYPTION_FAILED",
     };
   }
 
+  const cloudflareCredentials = {
+    accountId,
+    apiToken,
+  };
+
+  const textModel = credentials.textModel || DEFAULT_TEXT_MODEL;
+
   // ---------------------------------------------
-  // CALL OPENAI
+  // CALL CLOUDFLARE WORKERS AI
   // ---------------------------------------------
 
-  const extraction = await requestDesignContext(apiKey, briefing.value);
+  const extraction = await requestDesignContext(
+    cloudflareCredentials,
+    briefing.value,
+    textModel,
+  );
 
   if (!extraction.ok) {
     return extraction;
@@ -907,14 +790,10 @@ const extractDesignContext = async ({
     return validatedContext;
   }
 
-  // ---------------------------------------------
-  // SUCCESS
-  // ---------------------------------------------
-
   return {
     ok: true,
     context: validatedContext.value,
-    model: DEFAULT_TEXT_MODEL,
+    model: extraction.model || textModel,
   };
 };
 

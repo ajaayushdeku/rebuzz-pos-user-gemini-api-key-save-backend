@@ -4,7 +4,9 @@ const { isValidImageBuffer } = require("../../middlewares/uploadDesignAssets");
 // Limits
 // -----------------------------------------------------------------------------
 
-const MAX_TOTAL_IMAGES = 8;
+// FLUX.2 Klein 4B supports up to 4 input/reference images per request.
+const MAX_TOTAL_IMAGES = 4;
+
 const MAX_SOCIAL_URLS = 5;
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB per image
@@ -175,7 +177,6 @@ const detectImageMimeType = (buffer) => {
 
   // PNG signature
   if (
-    buffer.length >= 8 &&
     buffer
       .subarray(0, 8)
       .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
@@ -260,7 +261,7 @@ const validateUploadedImage = (file) => {
 /**
  * Convert validated uploads into base64 data URLs.
  *
- * These are supplied to the OpenAI Images API.
+ * Retained temporarily for compatibility with the previous OpenAI workflow.
  */
 const convertUploadsToImageInputs = (files = []) => {
   if (!Array.isArray(files)) {
@@ -276,6 +277,33 @@ const convertUploadsToImageInputs = (files = []) => {
 
     return {
       image_url: `data:${validation.mimeType};base64,${file.buffer.toString("base64")}`,
+    };
+  });
+};
+
+/**
+ * Prepare validated uploads for Cloudflare Workers AI.
+ *
+ * Cloudflare expects actual image buffers rather than OpenAI data URLs.
+ * The category preserves whether an image is a visual reference or an
+ * actual business asset.
+ */
+const convertUploadsToCloudflareInputs = (files = [], category) => {
+  if (!Array.isArray(files)) {
+    throw new Error("DESIGN_INPUTS_INVALID");
+  }
+
+  return files.map((file) => {
+    const validation = validateUploadedImage(file);
+
+    if (!validation.ok) {
+      throw new Error(validation.error);
+    }
+
+    return {
+      buffer: file.buffer,
+      mimeType: validation.mimeType,
+      category,
     };
   });
 };
@@ -363,11 +391,18 @@ const processDesignInputs = ({
 
     const processedReferences = convertUploadsToImageInputs(referenceImages);
 
+    const cloudflareReferences = convertUploadsToCloudflareInputs(
+      referenceImages,
+      "reference",
+    );
+
     // -------------------------------------------------------------------------
     // 4. Process actual brand/product assets
     // -------------------------------------------------------------------------
 
     const processedAssets = convertUploadsToImageInputs(assets);
+
+    const cloudflareAssets = convertUploadsToCloudflareInputs(assets, "asset");
 
     // -------------------------------------------------------------------------
     // 5. Validate social references
@@ -405,8 +440,15 @@ const processDesignInputs = ({
       referenceImages: processedReferences,
       assets: processedAssets,
 
-      // Combined inputs for the OpenAI image-generation request.
+      // Previous OpenAI-compatible inputs, retained for rollback.
       imageInputs: [...processedReferences, ...processedAssets],
+
+      // Cloudflare-compatible inputs containing actual image buffers.
+      cloudflareReferenceImages: cloudflareReferences,
+      cloudflareAssets,
+
+      // Combined Cloudflare inputs, preserving their original order.
+      cloudflareImageInputs: [...cloudflareReferences, ...cloudflareAssets],
 
       // Social URLs are metadata only.
       socialReferences,

@@ -11,7 +11,9 @@ const {
 
 const { buildDesignPrompt } = require("../helpers/aiDesign/promptBuilder");
 
-const { generateOpenAIImage } = require("../helpers/aiDesign/openaiClient");
+const {
+  generateCloudflareImage,
+} = require("../helpers/aiDesign/cloudflareClient");
 
 // -----------------------------------------------------------------------------
 // Limits
@@ -54,6 +56,7 @@ const FIELD_LIMITS = {
 
 const resolveImageSize = (dimensions = "", platform = "") => {
   const description = `${dimensions} ${platform}`.toLowerCase();
+
   const dimensionMatch = description.match(/(\d{2,5})\s*(?:x|×|:)\s*(\d{2,5})/);
 
   if (dimensionMatch) {
@@ -63,21 +66,27 @@ const resolveImageSize = (dimensions = "", platform = "") => {
     if (width > 0 && height > 0) {
       const ratio = width / height;
 
-      if (ratio > 1.15) return "1536x1024";
-      if (ratio < 0.87) return "1024x1536";
-      return "1024x1024";
+      if (ratio > 1.15) {
+        return { width: 1536, height: 1024 };
+      }
+
+      if (ratio < 0.87) {
+        return { width: 1024, height: 1536 };
+      }
+
+      return { width: 1024, height: 1024 };
     }
   }
 
   if (/portrait|vertical|story|reel|short|tiktok/.test(description)) {
-    return "1024x1536";
+    return { width: 1024, height: 1536 };
   }
 
   if (/landscape|horizontal|wide|banner/.test(description)) {
-    return "1536x1024";
+    return { width: 1536, height: 1024 };
   }
 
-  return "1024x1024";
+  return { width: 1024, height: 1024 };
 };
 
 // -----------------------------------------------------------------------------
@@ -109,26 +118,17 @@ const mapContextErrorStatus = (error) => {
 
     AI_SETTINGS_NOT_FOUND: 424,
     AI_SETTINGS_LOOKUP_FAILED: 500,
-    OPENAI_NOT_ENABLED: 403,
-    AI_KEY_MISSING: 424,
-    AI_KEY_DECRYPTION_FAILED: 500,
+    CLOUDFLARE_NOT_ENABLED: 403,
+    CLOUDFLARE_CREDENTIALS_MISSING: 424,
+    CLOUDFLARE_CREDENTIALS_DECRYPTION_FAILED: 500,
 
-    OPENAI_INVALID_API_KEY: 401,
-    OPENAI_PERMISSION_DENIED: 403,
-    OPENAI_QUOTA_EXCEEDED: 429,
-    OPENAI_RATE_LIMITED: 429,
-    OPENAI_REQUEST_LIMIT_REACHED: 429,
-    OPENAI_RATE_OR_QUOTA_LIMIT: 429,
-    OPENAI_TEXT_REQUEST_TIMEOUT: 504,
-    OPENAI_TEXT_MODEL_UNAVAILABLE: 502,
-    OPENAI_SERVICE_UNAVAILABLE: 503,
-    OPENAI_CONNECTION_FAILED: 502,
+    CLOUDFLARE_AUTH_ERROR: 401,
+    CLOUDFLARE_RATE_LIMIT: 429,
+    CLOUDFLARE_REQUEST_TIMEOUT: 504,
+    CLOUDFLARE_REQUEST_FAILED: 502,
+    CLOUDFLARE_INVALID_RESPONSE: 502,
+    CLOUDFLARE_NETWORK_ERROR: 502,
 
-    OPENAI_INVALID_RESPONSE: 502,
-    OPENAI_EMPTY_TEXT_RESPONSE: 502,
-    OPENAI_INCOMPLETE_RESPONSE: 502,
-    OPENAI_TEXT_EXTRACTION_FAILED: 502,
-    OPENAI_DESIGN_REQUEST_REFUSED: 400,
     INVALID_DESIGN_CONTEXT: 502,
     INVALID_DESIGN_CONTEXT_JSON: 502,
     DESIGN_CLARIFICATION_MISSING: 502,
@@ -139,62 +139,39 @@ const mapContextErrorStatus = (error) => {
 
 const mapImageErrorStatus = (error) => {
   const statusMap = {
-    OPENAI_INVALID_API_KEY: 401,
-    OPENAI_PERMISSION_DENIED: 403,
-    OPENAI_QUOTA_EXCEEDED: 429,
-    OPENAI_RATE_LIMITED: 429,
-    OPENAI_REQUEST_LIMIT_REACHED: 429,
-    OPENAI_RATE_OR_QUOTA_LIMIT: 429,
+    BUSINESS_ID_REQUIRED: 400,
 
-    OPENAI_IMAGE_MODERATION_BLOCKED: 400,
-    OPENAI_IMAGE_INVALID_REQUEST: 400,
-    OPENAI_IMAGE_INPUT_INVALID: 400,
-    OPENAI_IMAGE_INPUTS_INVALID: 400,
-    OPENAI_IMAGE_INPUT_COUNT_EXCEEDED: 400,
-    OPENAI_IMAGE_COUNT_INVALID: 400,
-    OPENAI_IMAGE_COUNT_MISMATCH: 502,
+    CLOUDFLARE_NOT_ENABLED: 403,
+    CLOUDFLARE_CREDENTIALS_MISSING: 424,
+    CLOUDFLARE_CREDENTIALS_DECRYPTION_FAILED: 500,
 
-    OPENAI_IMAGE_PROMPT_REQUIRED: 400,
-    OPENAI_IMAGE_PROMPT_TOO_LONG: 400,
-    OPENAI_IMAGE_MODEL_UNSUPPORTED: 400,
-    OPENAI_IMAGE_SIZE_UNSUPPORTED: 400,
-    OPENAI_IMAGE_QUALITY_UNSUPPORTED: 400,
-    OPENAI_IMAGE_FORMAT_UNSUPPORTED: 400,
-    OPENAI_IMAGE_BACKGROUND_UNSUPPORTED: 400,
-    OPENAI_IMAGE_TRANSPARENT_FORMAT_UNSUPPORTED: 400,
+    CLOUDFLARE_AUTH_ERROR: 401,
+    CLOUDFLARE_RATE_LIMIT: 429,
+    CLOUDFLARE_REQUEST_TIMEOUT: 504,
+    CLOUDFLARE_REQUEST_FAILED: 502,
+    CLOUDFLARE_INVALID_RESPONSE: 502,
+    CLOUDFLARE_NETWORK_ERROR: 502,
 
-    OPENAI_IMAGE_BACKGROUND_UNSUPPORTED: 400,
-    OPENAI_IMAGE_TRANSPARENT_FORMAT_UNSUPPORTED: 400,
-    OPENAI_IMAGE_EMPTY_RESPONSE: 502,
-    OPENAI_IMAGE_DATA_MISSING: 502,
-    OPENAI_IMAGE_SIGNATURE_INVALID: 502,
-    OPENAI_IMAGE_GENERATED_IMAGE_TOO_LARGE: 502,
+    DESIGN_IMAGE_PROMPT_REQUIRED: 400,
+    DESIGN_IMAGE_PROMPT_TOO_LONG: 400,
+    DESIGN_IMAGE_INPUT_INVALID: 400,
+    DESIGN_IMAGE_INPUT_COUNT_EXCEEDED: 400,
+    DESIGN_IMAGE_INPUT_TOO_LARGE: 413,
+    DESIGN_IMAGE_TOTAL_INPUT_TOO_LARGE: 413,
 
-    OPENAI_IMAGE_TOTAL_INPUT_TOO_LARGE: 413,
-    OPENAI_IMAGE_INPUT_TOO_LARGE: 413,
-    // OPENAI_IMAGE_GENERATED_IMAGE_TOO_LARGE: 502,
-    OPENAI_GENERATED_IMAGE_TOO_LARGE: 502,
-
-    OPENAI_IMAGE_EMPTY_RESPONSE: 502,
-    OPENAI_IMAGE_DATA_MISSING: 502,
-    OPENAI_GENERATED_IMAGE_INVALID: 502,
-    OPENAI_INVALID_RESPONSE: 502,
-
-    OPENAI_IMAGE_REQUEST_TIMEOUT: 504,
-    OPENAI_SERVICE_UNAVAILABLE: 503,
-    OPENAI_CONNECTION_FAILED: 502,
-    OPENAI_IMAGE_MODEL_UNAVAILABLE: 502,
-    OPENAI_IMAGE_GENERATION_FAILED: 502,
+    DESIGN_IMAGE_EMPTY_RESPONSE: 502,
+    DESIGN_IMAGE_DATA_MISSING: 502,
+    DESIGN_IMAGE_GENERATION_FAILED: 502,
   };
 
   return statusMap[error] || 502;
 };
 
 // -----------------------------------------------------------------------------
-// OpenAI image credentials
+// Cloudflare AI credentials
 // -----------------------------------------------------------------------------
 
-const getOpenAIImageKey = async (businessId) => {
+const getCloudflareCredentials = async (businessId) => {
   if (!businessId) {
     return {
       ok: false,
@@ -202,39 +179,62 @@ const getOpenAIImageKey = async (businessId) => {
     };
   }
 
-  const settings = await AISettings.findOne({
-    businessId,
-  });
+  let settings;
 
-  if (!settings?.openaiImage?.apiKey) {
+  try {
+    settings = await AISettings.findOne({ businessId });
+  } catch (error) {
+    console.error("[ai-design-settings-lookup]", error.message);
+
     return {
       ok: false,
-      error: "OPENAI_IMAGE_KEY_NOT_CONFIGURED",
+      error: "AI_SETTINGS_LOOKUP_FAILED",
     };
   }
 
-  if (!settings.openaiImage.enabled) {
+  const cloudflare = settings?.cloudflareAI;
+
+  if (!cloudflare?.accountId || !cloudflare?.apiToken) {
     return {
       ok: false,
-      error: "OPENAI_IMAGE_GENERATION_DISABLED",
+      error: "CLOUDFLARE_CREDENTIALS_MISSING",
+    };
+  }
+
+  if (!cloudflare.enabled) {
+    return {
+      ok: false,
+      error: "CLOUDFLARE_NOT_ENABLED",
     };
   }
 
   try {
-    const apiKey = decrypt(settings.openaiImage.apiKey);
+    const accountId = decrypt(cloudflare.accountId);
+    const apiToken = decrypt(cloudflare.apiToken);
 
-    if (typeof apiKey !== "string" || !apiKey.trim()) {
-      throw new Error("Invalid decrypted API key");
+    if (
+      typeof accountId !== "string" ||
+      !accountId.trim() ||
+      typeof apiToken !== "string" ||
+      !apiToken.trim()
+    ) {
+      throw new Error("Invalid decrypted Cloudflare credentials");
     }
 
     return {
       ok: true,
-      apiKey: apiKey.trim(),
+      credentials: {
+        accountId: accountId.trim(),
+        apiToken: apiToken.trim(),
+      },
+      imageModel: cloudflare.imageModel,
     };
-  } catch {
+  } catch (error) {
+    console.error("[ai-design-credentials-decryption]", error.message);
+
     return {
       ok: false,
-      error: "OPENAI_IMAGE_KEY_UNREADABLE",
+      error: "CLOUDFLARE_CREDENTIALS_DECRYPTION_FAILED",
     };
   }
 };
@@ -857,15 +857,16 @@ const aiDesignController = {
         });
       }
 
-      // 14. Retrieve OpenAI image-generation credentials.
-      const credentials = await getOpenAIImageKey(req.businessId);
+      // 14. Retrieve the business's Cloudflare credentials.
+      const credentials = await getCloudflareCredentials(req.businessId);
 
       if (!credentials.ok) {
         const statusMap = {
           BUSINESS_ID_REQUIRED: 400,
-          OPENAI_IMAGE_KEY_NOT_CONFIGURED: 424,
-          OPENAI_IMAGE_GENERATION_DISABLED: 403,
-          OPENAI_IMAGE_KEY_UNREADABLE: 500,
+          CLOUDFLARE_CREDENTIALS_MISSING: 424,
+          CLOUDFLARE_NOT_ENABLED: 403,
+          CLOUDFLARE_CREDENTIALS_DECRYPTION_FAILED: 500,
+          AI_SETTINGS_LOOKUP_FAILED: 500,
         };
 
         return res.status(statusMap[credentials.error] || 500).json({
@@ -874,34 +875,70 @@ const aiDesignController = {
         });
       }
 
-      // 15. Generate the final image.
-      const imageResult = await generateOpenAIImage(
-        credentials.apiKey,
-        designPrompt.prompt,
-        {
-          imageInputs: processedInputs.imageInputs,
-          size: resolveImageSize(
-            finalContext.dimensions,
-            finalContext.platform,
-          ),
-          n: 1,
-        },
+      // 15. Resolve requested image dimensions.
+      const imageSize = resolveImageSize(
+        finalContext.dimensions,
+        finalContext.platform,
       );
 
-      if (!imageResult.ok) {
-        console.warn("[ai-design-image-response]", {
-          error: imageResult.error,
-          requestId: imageResult.requestId ?? null,
+      // 16. Generate the image using Cloudflare Workers AI.
+      let imageResult;
+
+      try {
+        imageResult = await generateCloudflareImage(
+          credentials.credentials,
+          designPrompt.prompt,
+          {
+            imageInputs: processedInputs.cloudflareImageInputs,
+            width: imageSize.width,
+            height: imageSize.height,
+            model: credentials.imageModel,
+          },
+        );
+      } catch (error) {
+        const errorCode = error.code || "CLOUDFLARE_REQUEST_FAILED";
+
+        console.warn("[ai-design-cloudflare-image-error]", {
+          error: errorCode,
+          status: error.status || null,
         });
 
-        return res.status(mapImageErrorStatus(imageResult.error)).json({
+        return res.status(error.status || mapImageErrorStatus(errorCode)).json({
           success: false,
-          error: imageResult.error,
-          requestId: imageResult.requestId,
+          error: errorCode,
         });
       }
 
-      // 16. Return generated design and metadata.
+      // 17. Validate the generated image response.
+      if (
+        !imageResult ||
+        typeof imageResult.image !== "string" ||
+        !imageResult.image.trim() ||
+        !imageResult.mimeType
+      ) {
+        console.warn("[ai-design-cloudflare-image-response]", {
+          error: "CLOUDFLARE_INVALID_RESPONSE",
+        });
+
+        return res.status(502).json({
+          success: false,
+          error: "CLOUDFLARE_INVALID_RESPONSE",
+        });
+      }
+
+      // 18. Preserve the existing frontend image response structure.
+      //
+      // Cloudflare returns the Base64 image as `image`.
+      // The existing frontend expects it as `b64Json`.
+
+      const normalizedImages = [
+        {
+          b64Json: imageResult.image,
+          revisedPrompt: null,
+          mimeType: imageResult.mimeType,
+        },
+      ];
+
       return res.status(200).json({
         success: true,
         needsClarification: false,
@@ -915,13 +952,13 @@ const aiDesignController = {
 
         generation: {
           model: imageResult.model,
-          size: imageResult.size,
-          quality: imageResult.quality,
-          outputFormat: imageResult.outputFormat,
-          created: imageResult.created,
+          size: `${imageResult.width}x${imageResult.height}`,
+          quality: null,
+          outputFormat: imageResult.mimeType.split("/")[1] || "jpeg",
+          created: Math.floor(Date.now() / 1000),
         },
 
-        images: imageResult.images,
+        images: normalizedImages,
       });
     } catch (err) {
       return internalError(res, err);

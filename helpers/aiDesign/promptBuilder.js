@@ -5,7 +5,9 @@ const MAX_REQUIRED_TEXT_ITEMS = 30;
 const MAX_REQUIRED_TEXT_LENGTH = 300;
 
 const MAX_SOCIAL_REFERENCES = 5;
-const MAX_TOTAL_IMAGES = 8;
+
+// FLUX.2 Klein 4B supports up to 4 input images per request.
+const MAX_TOTAL_IMAGES = 4;
 
 const ALLOWED_SOCIAL_PLATFORMS = [
   "facebook",
@@ -414,10 +416,20 @@ Organize the content using appropriate typography and
 visual hierarchy while preserving the exact wording.
 `;
 
-const buildReferenceImagesSection = (count) => `
+const buildReferenceImagesSection = (count) => {
+  const imageList = Array.from(
+    { length: count },
+    (_, index) => `- Input image ${index + 1}: Visual reference`,
+  ).join("\n");
+
+  return `
 REFERENCE IMAGES:
 
 Number of uploaded reference images: ${count}
+
+The following input images are visual references:
+
+${imageList}
 
 These images are provided for visual inspiration.
 
@@ -442,11 +454,23 @@ IMPORTANT:
 
 Create an original composition based on the requested design.
 `;
+};
 
-const buildAssetsSection = (count) => `
+const buildAssetsSection = (count, referenceImagesCount = 0) => {
+  const imageList = Array.from(
+    { length: count },
+    (_, index) =>
+      `- Input image ${referenceImagesCount + index + 1}: Actual business asset`,
+  ).join("\n");
+
+  return `
 ACTUAL BRAND AND PRODUCT ASSETS:
 
 Number of uploaded actual assets: ${count}
+
+The following input images are actual business assets:
+
+${imageList}
 
 These images represent assets intended for inclusion
 in the final design.
@@ -470,6 +494,7 @@ Treat these assets as actual content, not merely inspiration.
 If a reference image conflicts with an actual uploaded asset,
 prioritize the actual uploaded asset.
 `;
+};
 
 const buildSocialReferencesSection = (references) => {
   if (!references.length) {
@@ -577,7 +602,7 @@ const buildDesignPrompt = ({
   if (!fields.prompt.value) {
     return {
       ok: false,
-      error: "OPENAI_IMAGE_PROMPT_REQUIRED",
+      error: "DESIGN_IMAGE_PROMPT_REQUIRED",
     };
   }
 
@@ -659,7 +684,7 @@ const buildDesignPrompt = ({
   }
 
   if (assetsCount > 0) {
-    sections.push(buildAssetsSection(assetsCount));
+    sections.push(buildAssetsSection(assetsCount, referenceImagesCount));
   }
 
   if (normalizedSocialReferences.length > 0) {
@@ -710,7 +735,7 @@ make a tasteful professional design choice.
   if (finalPrompt.length > MAX_PROMPT_LENGTH) {
     return {
       ok: false,
-      error: "OPENAI_IMAGE_PROMPT_TOO_LONG",
+      error: "DESIGN_IMAGE_PROMPT_TOO_LONG",
     };
   }
 

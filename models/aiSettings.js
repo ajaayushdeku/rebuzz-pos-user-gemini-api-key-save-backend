@@ -16,9 +16,6 @@ const encryptedValueSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    // Present from day one. Re-encrypting under a new key means finding the
-    // records still on the old one — a field lookup with this, a migration
-    // without it.
     keyVersion: {
       type: Number,
       required: true,
@@ -29,12 +26,9 @@ const encryptedValueSchema = new mongoose.Schema(
 );
 
 /**
- * One provider's credentials. The same shape for every provider, so a new one
- * is a field below rather than a new schema.
+ * One provider's credentials.
  *
- * `model` is a default only. Saving a key overwrites it with the model it
- * actually verified, so a saved key can never be used against a model it was
- * not tested with.
+ * Used by the existing AI Insights providers and OpenAI Image.
  */
 const providerCredentialsSchema = (defaultModel) => ({
   enabled: {
@@ -59,21 +53,71 @@ const providerCredentialsSchema = (defaultModel) => ({
   },
 });
 
+/**
+ * Cloudflare Workers AI configuration for AI Design.
+ *
+ * Each business stores its own Cloudflare Account ID and API Token.
+ * Both credentials are encrypted independently.
+ *
+ * This configuration is intentionally separate from the AI Insights
+ * provider configuration above.
+ */
+const cloudflareAICredentialsSchema = new mongoose.Schema(
+  {
+    enabled: {
+      type: Boolean,
+      default: true,
+    },
+
+    accountId: {
+      type: encryptedValueSchema,
+      default: null,
+    },
+
+    apiToken: {
+      type: encryptedValueSchema,
+      default: null,
+    },
+
+    maskedAccountId: {
+      type: String,
+      default: null,
+    },
+
+    maskedApiToken: {
+      type: String,
+      default: null,
+    },
+
+    textModel: {
+      type: String,
+      default: "@cf/zai-org/glm-4.7-flash",
+    },
+
+    imageModel: {
+      type: String,
+      default: "@cf/black-forest-labs/flux-2-klein-4b",
+    },
+
+    lastVerifiedAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  { _id: false },
+);
+
 const aiSettingsSchema = new mongoose.Schema(
   {
-    // String, not ObjectId, while this runs as its own service: the id arrives
-    // from the POS API's answer, and casting it here would couple this service
-    // to that id format. Becomes { type: ObjectId, ref: "Business" } when the
-    // model moves into khajaGharBackend.
+    // String, not ObjectId, while this runs as its own service.
     businessId: {
       type: String,
       required: true,
       unique: true,
       index: true,
     },
-    // The business's admin, as every khajaGharBackend tenant model carries.
-    // String for the same reason as businessId; becomes
-    // { type: ObjectId, ref: "User" } on the move. Lookups stay on businessId.
+
+    // The business's admin.
     adminId: {
       type: String,
       required: true,
@@ -81,44 +125,48 @@ const aiSettingsSchema = new mongoose.Schema(
     },
 
     /**
-     * Which provider this business uses. Defaults to Gemini, which is what
-     * every record written before there was a choice is using — so existing
-     * businesses keep working with no migration.
+     * AI Insights provider selection.
+     * Existing businesses continue using Gemini by default.
      */
     provider: {
       type: String,
       default: "gemini",
     },
 
-    // One block per provider, rather than one shared block, so switching
-    // provider does not throw away the key for the old one: switch back and
-    // it still works.
+    // Existing AI Insights providers.
     gemini: providerCredentialsSchema("gemini-3.6-flash"),
     openrouter: providerCredentialsSchema("openrouter/free"),
     groq: providerCredentialsSchema("openai/gpt-oss-20b"),
     mistral: providerCredentialsSchema("mistral-small-latest"),
     nvidia: providerCredentialsSchema("openai/gpt-oss-20b"),
+
+    // Existing OpenAI image configuration retained for rollback.
     openaiImage: providerCredentialsSchema(null),
+
+    // Separate Cloudflare configuration for AI Design.
+    cloudflareAI: {
+      type: cloudflareAICredentialsSchema,
+      default: () => ({}),
+    },
   },
   {
     timestamps: true,
   },
 );
 
-/** The credentials for the provider in use. */
+/** Existing AI Insights provider selection. */
 aiSettingsSchema.methods.active = function () {
   return this[this.provider] ?? this.gemini;
 };
 
 /**
- * The only shape allowed to leave the server.
- *
- * Controllers return this rather than the document, so a field added to the
- * schema later cannot leak by default.
+ * Existing AI Insights response format.
+ * Cloudflare AI Design credentials are deliberately excluded.
  */
 aiSettingsSchema.methods.formatted = function (req) {
   const active = this.active();
   const settings = pick("provider", "updatedAt")(this);
+
   return {
     provider: settings.provider ?? "gemini",
     configured: Boolean(active?.apiKey),
@@ -130,9 +178,7 @@ aiSettingsSchema.methods.formatted = function (req) {
   };
 };
 
-// Belt and braces: if a document is ever serialised directly — a stray
-// res.json(doc), a logger that stringifies its input — the ciphertext does
-// not travel with it.
+// Prevent encrypted credentials from being exposed through serialization.
 aiSettingsSchema.set("toJSON", {
   transform(_doc, ret) {
     if (ret.gemini) delete ret.gemini.apiKey;
@@ -141,9 +187,16 @@ aiSettingsSchema.set("toJSON", {
     if (ret.mistral) delete ret.mistral.apiKey;
     if (ret.nvidia) delete ret.nvidia.apiKey;
     if (ret.openaiImage) delete ret.openaiImage.apiKey;
+
+    if (ret.cloudflareAI) {
+      delete ret.cloudflareAI.accountId;
+      delete ret.cloudflareAI.apiToken;
+    }
+
     return ret;
   },
 });
 
 const AISettings = mongoose.model("AISettings", aiSettingsSchema);
+
 module.exports = AISettings;

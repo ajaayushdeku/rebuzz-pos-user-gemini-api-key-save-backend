@@ -1,4 +1,3 @@
-
 const express = require("express");
 const router = express.Router();
 
@@ -9,17 +8,13 @@ const {
   aiDesignSettingsController,
 } = require("../../controller/aiDesignSettingsController");
 
-// Independent verification budget for OpenAI credentials.
+// Independent verification rate limit for Cloudflare Workers AI credentials.
 const verifyGuard = verifyRateLimit();
 
-// Retrieve masked settings.
-router.get(
-  "/",
-  requireBusiness,
-  aiDesignSettingsController.getSettings,
-);
+// Retrieve masked Cloudflare settings.
+router.get("/", requireBusiness, aiDesignSettingsController.getSettings);
 
-// Save and verify a new key.
+// Verify and save Cloudflare credentials.
 router.post(
   "/",
   requireBusiness,
@@ -27,7 +22,7 @@ router.post(
   aiDesignSettingsController.saveKey,
 );
 
-// Verify a supplied key or test the saved key.
+// Verify supplied credentials or test the saved credentials.
 router.post(
   "/verify",
   requireBusiness,
@@ -35,18 +30,10 @@ router.post(
   aiDesignSettingsController.verifyKey,
 );
 
-// Enable or disable image generation.
-router.patch(
-  "/",
-  requireBusiness,
-  aiDesignSettingsController.updateSettings,
-);
+// Enable or disable Cloudflare AI.
+router.patch("/", requireBusiness, aiDesignSettingsController.updateSettings);
 
-// Remove the saved key.
-router.delete(
-  "/",
-  requireBusiness,
-  aiDesignSettingsController.deleteKey,
-);
+// Remove saved Cloudflare credentials.
+router.delete("/", requireBusiness, aiDesignSettingsController.deleteKey);
 
 module.exports = router;
