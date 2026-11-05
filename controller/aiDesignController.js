@@ -901,11 +901,18 @@ const aiDesignController = {
         console.warn("[ai-design-cloudflare-image-error]", {
           error: errorCode,
           status: error.status || null,
+          providerCode: error.providerCode || null,
+          providerMessage: error.providerMessage || null,
+          requestId: error.requestId || null,
         });
 
         return res.status(error.status || mapImageErrorStatus(errorCode)).json({
           success: false,
           error: errorCode,
+          ...(error.providerCode != null
+            ? { providerCode: error.providerCode }
+            : {}),
+          ...(error.requestId ? { requestId: error.requestId } : {}),
         });
       }
 

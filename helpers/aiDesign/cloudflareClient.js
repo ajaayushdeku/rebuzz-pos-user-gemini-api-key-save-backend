@@ -48,13 +48,20 @@ const createCloudflareError = (status, response) => {
     );
   }
 
-  return new CloudflareAIError(
+  const error = new CloudflareAIError(
     "CLOUDFLARE_REQUEST_FAILED",
     apiError?.message ||
       response?.messages?.[0]?.message ||
       "The Cloudflare AI request failed.",
     status || 502,
   );
+
+  // Keep provider details available for server-side diagnostics. The API
+  // response to the browser still uses our stable application error code.
+  error.providerCode = apiError?.code ?? null;
+  error.providerMessage = apiError?.message || response?.messages?.[0]?.message || null;
+  error.requestId = response?.result?.id ?? response?.result?.request_id ?? null;
+  return error;
 };
 
 // -----------------------------------------------------------------------------
@@ -138,7 +145,13 @@ const cloudflareRequest = async ({
     const result = await response.json();
 
     if (!response.ok || result?.success !== true) {
-      throw createCloudflareError(response.status, result);
+      const error = createCloudflareError(response.status, result);
+      error.requestId =
+        response.headers.get("cf-ray") ||
+        result?.result?.id ||
+        result?.result?.request_id ||
+        null;
+      throw error;
     }
 
     return result.result;
