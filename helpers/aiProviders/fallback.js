@@ -133,6 +133,24 @@ async function generateWithFallback({
       continue;
     }
 
+    // A transport-level success is not enough when the caller requested JSON.
+    // Do not permanently switch providers if the candidate returned malformed
+    // output; the controller will report AI_MALFORMED_RESPONSE as usual.
+    if (options.responseSchema) {
+      try {
+        JSON.parse(result.text);
+      } catch {
+        return {
+          ...result,
+          providerId: candidateId,
+          credentials: candidateCredentials,
+          fallback: true,
+          fallbackFrom: providerId,
+          providerPersisted: false,
+        };
+      }
+    }
+
     const persisted = await persistFallbackProvider({
       businessId,
       previousProviderId: providerId,
