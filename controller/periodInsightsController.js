@@ -355,7 +355,13 @@ const periodInsightsController = {
         )
       ) {
         return res.json({
-          data: { answer: cached.insights, model: cached.model, spent: false },
+          data: {
+            answer: cached.insights,
+            model: cached.model,
+            provider: cached.provider ?? req.generation.providerId,
+            settingsModel: cached.settingsModel,
+            spent: false,
+          },
         });
       }
 
