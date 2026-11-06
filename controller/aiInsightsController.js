@@ -1,6 +1,6 @@
 const { AISettings, AIInsightCache } = require("../models");
-const { decrypt } = require("../helpers/aiCrypto");
-const { DEFAULT_PROVIDER, getProvider } = require("../helpers/aiProviders");
+const { DEFAULT_PROVIDER } = require("../helpers/aiProviders");
+const { generateWithFallback } = require("../helpers/aiProviders/fallback");
 
 /**
  * The one place a stored key is ever used.
@@ -104,6 +104,7 @@ const storeInCache = async (req, { insights, model, generatedAt }) => {
         insights,
         model,
         settingsModel: settingsSignature(req.insight),
+        provider: req.insight.providerId,
         generatedAt,
         expiresAt: new Date(generatedAt.getTime() + CACHE_TTL_MS),
       },
@@ -248,6 +249,7 @@ const aiInsightsController = {
         data: {
           insights: hit.insights,
           model: hit.model,
+          provider: hit.provider ?? req.insight.providerId,
           // Nothing was spent on this request.
           usage: null,
           generatedAt: hit.generatedAt.toISOString(),
@@ -325,26 +327,31 @@ const aiInsightsController = {
         credentials,
       } = req.insight;
 
-      let apiKey;
-      try {
-        apiKey = decrypt(credentials.apiKey);
-      } catch {
-        // decrypt throws when the auth tag does not verify: the record was
-        // altered, or it was written under a different AI_ENCRYPTION_KEY.
-        // Neither is recoverable here, and re-entering the key is the only fix
-        // — so say that rather than letting it surface as a generic 500.
+      const result = await generateWithFallback({
+        businessId: req.businessId,
+        settings: req.insight.settings,
+        providerId,
+        credentials,
+        options: {
+          briefing,
+          systemInstruction: systemInstruction || undefined,
+          responseSchema: responseSchema || undefined,
+        },
+      });
+
+      if (result.error === "KEY_UNREADABLE") {
         console.error(
           `[insights] could not decrypt key for business=${req.businessId}`,
         );
         return res.status(500).json({ error: "KEY_UNREADABLE" });
       }
 
-      const result = await getProvider(providerId).generateInsights(apiKey, {
-        briefing,
-        systemInstruction: systemInstruction || undefined,
-        responseSchema: responseSchema || undefined,
-        model: credentials.model || undefined,
-      });
+      if (result.ok) {
+        // From this point onward, cache signatures and response metadata must
+        // describe the provider that actually generated the answer.
+        req.insight.providerId = result.providerId;
+        req.insight.credentials = result.credentials;
+      }
 
       if (!result.ok) {
         // One structured line per failed insight call: which tenant, which
@@ -446,6 +453,7 @@ const aiInsightsController = {
         data: {
           insights,
           model: result.model,
+          provider: result.providerId,
           usage: result.usage,
           generatedAt: generatedAt.toISOString(),
           cached: false,
