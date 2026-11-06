@@ -1,8 +1,8 @@
 const { aiInsightsStore } = require("../data/aiInsightsStore");
 const AISettings = require("../models/aiSettings");
 const AIInsightCache = require("../models/aiInsightCache");
-const { decrypt } = require("../helpers/aiCrypto");
-const { DEFAULT_PROVIDER, getProvider } = require("../helpers/aiProviders");
+const { DEFAULT_PROVIDER } = require("../helpers/aiProviders");
+const { generateWithFallback } = require("../helpers/aiProviders/fallback");
 const { runOnce } = require("../helpers/inFlight");
 const {
   DEFAULT_PERIOD_KIND,
@@ -305,6 +305,7 @@ const periodInsightsController = {
         responseSchema,
         providerId,
         credentials,
+        settings,
         /** Cards already on screen, so a further batch does not repeat them. */
         exclude: Array.isArray(req.body?.exclude) ? req.body.exclude : [],
       };
@@ -345,9 +346,22 @@ const periodInsightsController = {
 
       // Only when nobody asked for a new one: a regeneration means "ask again",
       // and serving an earlier draft would make the button appear to do nothing.
-      if (cached && mode === "ensure") {
+      if (
+        cached &&
+        mode === "ensure" &&
+        cached.settingsModel === signatureOf(
+          req.generation.providerId,
+          req.generation.credentials,
+        )
+      ) {
         return res.json({
-          data: { answer: cached.insights, model: cached.model, spent: false },
+          data: {
+            answer: cached.insights,
+            model: cached.model,
+            provider: cached.provider ?? req.generation.providerId,
+            settingsModel: cached.settingsModel,
+            spent: false,
+          },
         });
       }
 
@@ -396,9 +410,10 @@ const periodInsightsController = {
             adminId: req.adminId,
             insights: result.insights,
             model: result.model,
+            provider: result.providerId,
             settingsModel: signatureOf(
-              req.generation.providerId,
-              req.generation.credentials,
+              result.providerId,
+              result.credentials,
             ),
             generatedAt,
             expiresAt: new Date(generatedAt.getTime() + DRAFT_TTL_MS),
@@ -430,10 +445,10 @@ const periodInsightsController = {
           answer: result.insights,
           model: result.model,
           usage: result.usage,
-          provider: req.generation.providerId,
+          provider: result.providerId,
           settingsModel: signatureOf(
-            req.generation.providerId,
-            req.generation.credentials,
+            result.providerId,
+            result.credentials,
           ),
           spent: !shared,
           shared,
@@ -584,16 +599,6 @@ const periodInsightsController = {
       exclude,
     } = req.generation;
 
-    let apiKey;
-    try {
-      apiKey = decrypt(credentials.apiKey);
-    } catch {
-      // The ciphertext no longer verifies: altered, or written under a different
-      // AI_ENCRYPTION_KEY. Re-entering the key is the only fix, so say that
-      // rather than letting it surface as a generic failure.
-      return { ok: false, error: "KEY_UNREADABLE" };
-    }
-
     const instruction = exclude.length
       ? `${systemInstruction}\n\nAlready shown, do not repeat:\n${exclude
           .slice(0, 50)
@@ -601,11 +606,16 @@ const periodInsightsController = {
           .join("\n")}`
       : systemInstruction;
 
-    const result = await getProvider(providerId).generateInsights(apiKey, {
-      briefing,
-      systemInstruction: instruction || undefined,
-      responseSchema: responseSchema || undefined,
-      model: credentials.model || undefined,
+    const result = await generateWithFallback({
+      businessId: req.businessId,
+      settings: req.generation.settings,
+      providerId,
+      credentials,
+      options: {
+        briefing,
+        systemInstruction: instruction || undefined,
+        responseSchema: responseSchema || undefined,
+      },
     });
 
     if (!result.ok) return result;
@@ -613,7 +623,10 @@ const periodInsightsController = {
     // The model is told to return JSON, never trusted to. A malformed answer is
     // its own failure, reported with the code the UI already understands.
     try {
-      return { ...result, insights: JSON.parse(result.text) };
+      return {
+        ...result,
+        insights: JSON.parse(result.text),
+      };
     } catch {
       return {
         ok: false,
