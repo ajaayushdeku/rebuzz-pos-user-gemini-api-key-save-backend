@@ -16,7 +16,7 @@ const BASE = "https://api.z.ai/api/paas/v4";
  */
 const DEFAULT_MODEL = "glm-4.7-flash";
 
-const NOT_FOR_TEXT = /(?:\\d+\\.\\d+v(?:-|$)|vision|asr|ocr|embed|image|video|audio)/i;
+const NOT_FOR_TEXT = /(?:glm-\d+\.\d+v(?:-|$)|vision|asr|ocr|embed|image|video|audio)/i;
 
 const provider = createOpenAiCompatibleProvider({
   id: "zai",
