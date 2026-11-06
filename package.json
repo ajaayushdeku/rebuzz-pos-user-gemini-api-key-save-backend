@@ -2,7 +2,7 @@
   "name": "rebuzz-ai-service",
   "version": "0.1.0",
   "private": true,
-  "description": "Stores each business's own AI provider key (Gemini or OpenRouter) and makes model calls on their behalf.",
+  "description": "Stores each business's own encrypted AI provider key and makes model calls on their behalf.",
   "main": "app.js",
   "scripts": {
     "dev": "node --watch --env-file=.env app.js",

@@ -27,6 +27,7 @@ const openrouter = require("./openrouter");
 const groq = require("./groq");
 const mistral = require("./mistral");
 const nvidia = require("./nvidia");
+const zai = require("./zai");
 
 /**
  * The Gemini service still speaks its own `GEMINI_*` codes.
@@ -155,6 +156,16 @@ const PROVIDERS = {
     listModels: nvidia.listModels,
     suggestModels: nvidia.suggestModels,
     generateInsights: nvidia.generateInsights,
+  },
+  zai: {
+    id: "zai",
+    label: "Z.AI (GLM)",
+    defaultModel: zai.DEFAULT_MODEL,
+    keysUrl: "https://z.ai/manage-apikey/apikey-list",
+    verifyKey: zai.verifyKey,
+    listModels: zai.listModels,
+    suggestModels: zai.suggestModels,
+    generateInsights: zai.generateInsights,
   },
 };
 
