@@ -51,6 +51,10 @@ const providerCredentialsSchema = (defaultModel) => ({
     type: Date,
     default: null,
   },
+  allowAutomaticFallback: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 /**

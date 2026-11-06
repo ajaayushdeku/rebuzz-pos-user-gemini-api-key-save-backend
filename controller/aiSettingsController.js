@@ -30,10 +30,17 @@ const internalError = (res, err) => {
  * refused: it can only come from a client newer than this service, and
  * falling back to the configured provider is the harmless reading.
  */
-const providerIdFor = (req, settings) =>
-  isProviderId(req.body?.provider)
-    ? req.body.provider
-    : (settings?.provider ?? DEFAULT_PROVIDER);
+const providerIdFor = (req, settings) => {
+  if (isProviderId(req.body?.providerId)) {
+    return req.body.providerId;
+  }
+
+  if (isProviderId(req.body?.provider)) {
+    return req.body.provider;
+  }
+
+  return settings?.provider ?? DEFAULT_PROVIDER;
+};
 
 /** The stored credentials for one provider, or null when there are none. */
 const credentialsFor = (settings, providerId) =>
@@ -84,7 +91,13 @@ const aiSettingsController = {
             enabled: false,
             model: null,
             maskedKey: null,
-            providers: providerCatalogue(),
+            providers: providerCatalogue().map((provider) => ({
+              ...provider,
+              configured: false,
+              enabled: false,
+              allowAutomaticFallback: false,
+            })),
+            configuredProviders: [],
           },
         });
       }
@@ -94,7 +107,16 @@ const aiSettingsController = {
           ...settings.formatted(req),
           // Sent with the settings so the form can offer the choices without a
           // second request. Names and links only — never a credential.
-          providers: providerCatalogue(),
+          providers: providerCatalogue().map((provider) => {
+            const config = settings?.[provider.id];
+
+            return {
+              ...provider,
+              configured: Boolean(config?.apiKey),
+              enabled: Boolean(config?.enabled),
+              allowAutomaticFallback: config?.allowAutomaticFallback ?? false,
+            };
+          }),
           // Which other providers already hold a key, so switching can say
           // whether it will need one.
           configuredProviders: providerCatalogue()
@@ -262,6 +284,17 @@ const aiSettingsController = {
         update[`${providerId}.enabled`] = req.body.enabled;
       }
 
+      if (typeof req.body?.allowAutomaticFallback === "boolean") {
+        if (!credentialsFor(current, providerId)) {
+          return res.status(404).json({
+            error: "NOT_CONFIGURED",
+          });
+        }
+
+        update[`${providerId}.allowAutomaticFallback`] =
+          req.body.allowAutomaticFallback;
+      }
+
       if (model) {
         if (!credentialsFor(current, providerId)) {
           return res.status(404).json({ error: "NOT_CONFIGURED" });
@@ -328,6 +361,7 @@ const aiSettingsController = {
           [`${providerId}.maskedKey`]: null,
           [`${providerId}.enabled`]: false,
           [`${providerId}.lastVerifiedAt`]: null,
+          [`${providerId}.allowAutomaticFallback`]: false,
         },
       );
 
