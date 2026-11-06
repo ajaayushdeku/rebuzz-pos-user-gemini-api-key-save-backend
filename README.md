@@ -34,11 +34,12 @@ changes, because nothing else imports a provider directly.
 | `groq`       | `helpers/aiProviders/groq.js` | `openai/gpt-oss-20b`                       | Only the families Groq documents as honouring `json_schema` |
 | `mistral`    | `helpers/aiProviders/mistral.js` | `mistral-small-latest`                     | Limits are per model; see the save-time fallback below      |
 | `nvidia`     | `helpers/aiProviders/nvidia.js` | `openai/gpt-oss-20b`                       | NVIDIA NIM trial credits                                    |
+| `zai`        | `helpers/aiProviders/zai.js`    | `glm-4.7-flash`                            | GLM models; JSON-object output with server-side validation  |
 
 Every provider but Gemini is the OpenAI-compatible shape, so they share
 `helpers/aiProviders/openaiCompatible.js` and are a short configuration each: base
 URL, key check, and which models to offer. Another provider of that shape is
-another such file.
+another such file. Z.AI uses JSON-object mode rather than strict JSON Schema; its schema is included in the system instruction and the Insights controller validates the returned JSON.
 
 Free tiers change terms without notice. A provider that starts asking for a
 card before its free tier works answers `AI_PAYMENT_REQUIRED`, whatever status
