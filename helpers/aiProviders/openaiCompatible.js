@@ -157,6 +157,7 @@ function createOpenAiCompatibleProvider({
   headers = {},
   keyCheckPath,
   offerModel,
+  responseFormat = "json_schema",
 }) {
   async function call(apiKey, path, { method = "GET", body, timeout }) {
     const res = await fetch(`${baseUrl}${path}`, {
@@ -309,21 +310,32 @@ function createOpenAiCompatibleProvider({
         body: {
           model,
           messages: [
-            ...(systemInstruction
-              ? [{ role: "system", content: systemInstruction }]
+            ...(systemInstruction || (responseFormat === "json_object" && responseSchema)
+              ? [{
+                  role: "system",
+                  content: [
+                    systemInstruction,
+                    responseFormat === "json_object" && responseSchema
+                      ? `Return only valid JSON matching this schema. Do not include Markdown fences or explanatory text.\nSchema:\n${JSON.stringify(responseSchema)}`
+                      : null,
+                  ].filter(Boolean).join("\n\n"),
+                }]
               : []),
             { role: "user", content: briefing },
           ],
           ...(responseSchema
             ? {
-                response_format: {
-                  type: "json_schema",
-                  json_schema: {
-                    name: "insights",
-                    strict: true,
-                    schema: toStrictSchema(responseSchema),
-                  },
-                },
+                response_format:
+                  responseFormat === "json_object"
+                    ? { type: "json_object" }
+                    : {
+                        type: "json_schema",
+                        json_schema: {
+                          name: "insights",
+                          strict: true,
+                          schema: toStrictSchema(responseSchema),
+                        },
+                      },
               }
             : {}),
           temperature: 0.2,
