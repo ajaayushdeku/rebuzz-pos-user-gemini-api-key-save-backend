@@ -143,6 +143,7 @@ const aiSettingsSchema = new mongoose.Schema(
     groq: providerCredentialsSchema("openai/gpt-oss-20b"),
     mistral: providerCredentialsSchema("mistral-small-latest"),
     nvidia: providerCredentialsSchema("openai/gpt-oss-20b"),
+    zai: providerCredentialsSchema("glm-4.7-flash"),
 
     // Existing OpenAI image configuration retained for rollback.
     openaiImage: providerCredentialsSchema(null),
@@ -190,6 +191,7 @@ aiSettingsSchema.set("toJSON", {
     if (ret.groq) delete ret.groq.apiKey;
     if (ret.mistral) delete ret.mistral.apiKey;
     if (ret.nvidia) delete ret.nvidia.apiKey;
+    if (ret.zai) delete ret.zai.apiKey;
     if (ret.openaiImage) delete ret.openaiImage.apiKey;
 
     if (ret.cloudflareAI) {
