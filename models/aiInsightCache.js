@@ -43,6 +43,11 @@ const aiInsightCacheSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    // The provider that actually generated the answer (including automatic fallback).
+    provider: {
+      type: String,
+      default: null,
+    },
     /**
      * The provider and model saved in settings when this was generated.
      *
