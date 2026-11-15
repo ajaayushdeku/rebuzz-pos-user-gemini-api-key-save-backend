@@ -16,16 +16,21 @@ const BASE = "https://api.z.ai/api/paas/v4";
  */
 const DEFAULT_MODEL = "glm-4.7-flash";
 
-const NOT_FOR_TEXT = /(?:glm-\d+\.\d+v(?:-|$)|vision|asr|ocr|embed|image|video|audio)/i;
+const NOT_FOR_TEXT =
+  /(?:glm-\d+\.\d+v(?:-|$)|vision|asr|ocr|embed|image|video|audio)/i;
 
 const provider = createOpenAiCompatibleProvider({
   id: "zai",
   baseUrl: BASE,
   defaultModel: DEFAULT_MODEL,
-  // Z.AI's API documents JSON-object mode rather than OpenAI strict JSON Schema.
-  // The common adapter includes the schema in the system prompt and the
-  // controller validates the returned JSON before saving insights.
   responseFormat: "json_object",
+
+  insightTimeoutMs: 120_000,
+
+  // Do not repeatedly hit Z.AI when its rate limit is reached.
+  retryableErrors: ["AI_UNAVAILABLE"],
+  retryDelaysMs: [2_000],
+
   offerModel: (entry) => {
     const name = String(entry?.id ?? "");
     return Boolean(name) && /^glm-/i.test(name) && !NOT_FOR_TEXT.test(name);

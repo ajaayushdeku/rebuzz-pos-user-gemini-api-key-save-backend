@@ -26,6 +26,38 @@ const { PERIOD_KINDS } = require("../helpers/analyticsPeriods");
  * readable until it is deliberately removed.
  */
 
+const itemStatusSchema = new mongoose.Schema(
+  {
+    suggestionId: {
+      type: String,
+      required: true,
+    },
+
+    status: {
+      type: String,
+      enum: ["added", "dismissed"],
+      required: true,
+    },
+
+    addedProductId: {
+      type: mongoose.Schema.Types.ObjectId,
+      // ref: "Product",
+      default: null,
+    },
+
+    addedAt: {
+      type: Date,
+      default: null,
+    },
+
+    dismissedAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  { _id: false },
+);
+
 const aiInsightsSchema = new mongoose.Schema(
   {
     // String, not ObjectId, for the same reason as the other models here: the
@@ -167,6 +199,17 @@ const aiInsightsSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
+    /**
+     * User actions associated with generated suggestion cards.
+     *
+     * Kept separately from `items` so regenerating AI content cannot erase
+     * previously recorded user actions.
+     */
+    itemStatuses: {
+      type: [itemStatusSchema],
+      default: [],
+    },
   },
   {
     timestamps: true,
@@ -194,12 +237,59 @@ aiInsightsSchema.index(
 aiInsightsSchema.index({ businessId: 1, periodKind: 1, periodStart: -1 });
 
 /** The shape that leaves the server, matching what the frontend already reads. */
+// aiInsightsSchema.methods.formatted = function () {
+//   return {
+//     period: { kind: this.periodKind, id: this.periodId },
+//     section: this.section,
+//     promptVersion: this.promptVersion,
+//     items: this.items ?? [],
+//     ...(this.extra ?? {}),
+//     basis: this.basis ?? null,
+//     model: this.model,
+//     provider: this.provider,
+//     generatedAt: this.generatedAt?.toISOString() ?? null,
+//     revision: this.revision,
+//     batches: this.batches,
+//     noMore: this.noMore,
+//     /** Nothing was spent answering this request. */
+//     stored: true,
+//   };
+// };
+
 aiInsightsSchema.methods.formatted = function () {
+  const statusesById = new Map(
+    (this.itemStatuses ?? []).map((entry) => [entry.suggestionId, entry]),
+  );
+
+  const items = (this.items ?? []).map((item) => {
+    // Preserve unexpected or non-object entries without modification.
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return item;
+    }
+
+    const status = item.id ? statusesById.get(String(item.id)) : null;
+
+    return {
+      ...item,
+      status: status?.status ?? "suggested",
+
+      ...(status?.addedProductId
+        ? { addedProductId: String(status.addedProductId) }
+        : {}),
+
+      ...(status?.addedAt ? { addedAt: status.addedAt.toISOString() } : {}),
+
+      ...(status?.dismissedAt
+        ? { dismissedAt: status.dismissedAt.toISOString() }
+        : {}),
+    };
+  });
+
   return {
     period: { kind: this.periodKind, id: this.periodId },
     section: this.section,
     promptVersion: this.promptVersion,
-    items: this.items ?? [],
+    items,
     ...(this.extra ?? {}),
     basis: this.basis ?? null,
     model: this.model,
@@ -208,7 +298,6 @@ aiInsightsSchema.methods.formatted = function () {
     revision: this.revision,
     batches: this.batches,
     noMore: this.noMore,
-    /** Nothing was spent answering this request. */
     stored: true,
   };
 };

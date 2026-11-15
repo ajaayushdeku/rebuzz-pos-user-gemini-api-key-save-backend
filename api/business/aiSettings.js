@@ -2,7 +2,9 @@ const express = require("express");
 const router = express.Router();
 const requireBusiness = require("../../middlewares/requireBusiness");
 const { verifyRateLimit } = require("../../middlewares/aiRateLimit");
-const { aiSettingsController } = require("../../controller/aiSettingsController");
+const {
+  aiSettingsController,
+} = require("../../controller/aiSettingsController");
 
 /**
  * One budget for every live call these routes make to a provider.
@@ -34,7 +36,12 @@ router.patch(
   aiSettingsController.updateSettings,
 );
 router.delete("/", requireBusiness, aiSettingsController.deleteKey);
-router.post("/test", requireBusiness, verifyGuard, aiSettingsController.testKey);
+router.post(
+  "/test",
+  requireBusiness,
+  verifyGuard,
+  aiSettingsController.testKey,
+);
 router.get(
   "/models",
   requireBusiness,

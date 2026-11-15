@@ -23,6 +23,18 @@ const keyOf = ({ businessId, period, section, promptVersion }) => ({
   promptVersion,
 });
 
+const findItemStatus = (document, suggestionId) =>
+  document?.itemStatuses?.find((entry) => entry.suggestionId === suggestionId);
+
+const hasSuggestion = (document, suggestionId) =>
+  document?.items?.some(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      String(item.id) === suggestionId,
+  );
+
 const aiInsightsStore = {
   /**
    * Every section stored for one business and period.
@@ -52,7 +64,21 @@ const aiInsightsStore = {
    * unique index, and `$setOnInsert` for `generatedAt` and `revision` so a
    * second attempt does not relabel the first answer as newer than it is.
    */
-  async store(key, { periodStart, periodEnd, adminId, items, extra, basis, model, provider, settingsModel, generatedAt }) {
+  async store(
+    key,
+    {
+      periodStart,
+      periodEnd,
+      adminId,
+      items,
+      extra,
+      basis,
+      model,
+      provider,
+      settingsModel,
+      generatedAt,
+    },
+  ) {
     return AIInsights.findOneAndUpdate(
       keyOf(key),
       {
@@ -85,7 +111,10 @@ const aiInsightsStore = {
    * added to the old one are gone rather than appended to something that no
    * longer says the same thing.
    */
-  async replace(key, { items, extra, basis, model, provider, settingsModel, generatedAt }) {
+  async replace(
+    key,
+    { items, extra, basis, model, provider, settingsModel, generatedAt },
+  ) {
     return AIInsights.findOneAndUpdate(
       keyOf(key),
       {
@@ -99,6 +128,7 @@ const aiInsightsStore = {
           lastRegeneratedAt: generatedAt,
           batches: 1,
           noMore: false,
+          itemStatuses: [],
         },
         $inc: { revision: 1 },
       },
@@ -160,6 +190,225 @@ const aiInsightsStore = {
         },
       },
     ]);
+  },
+
+  /**
+   * Mark a suggestion as added to the product catalogue.
+   *
+   * Uses conditional atomic updates:
+   * 1. Update an existing non-added status.
+   * 2. If no status exists, atomically append one.
+   * 3. If another request won the race, read and return its result.
+   *
+   * An existing added association can never be reassigned.
+   */
+  async markItemAdded(key, { suggestionId, productId }) {
+    const identity = keyOf(key);
+    const now = new Date();
+
+    const itemFilter = {
+      ...identity,
+      items: {
+        $elemMatch: { id: suggestionId },
+      },
+    };
+
+    // Case 1: A status already exists, but it is not "added".
+    // This also allows dismissed -> added.
+    let document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $elemMatch: {
+            suggestionId,
+            status: { $ne: "added" },
+          },
+        },
+      },
+      {
+        $set: {
+          "itemStatuses.$[entry].status": "added",
+          "itemStatuses.$[entry].addedProductId": productId,
+          "itemStatuses.$[entry].addedAt": now,
+          "itemStatuses.$[entry].dismissedAt": null,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+        arrayFilters: [
+          {
+            "entry.suggestionId": suggestionId,
+            "entry.status": { $ne: "added" },
+          },
+        ],
+      },
+    );
+
+    if (document) {
+      return {
+        document,
+        alreadyAdded: false,
+        sameProduct: true,
+      };
+    }
+
+    // Case 2: No status exists yet.
+    // The conditional filter prevents concurrent requests from inserting
+    // multiple status entries for the same suggestion.
+    document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $not: {
+            $elemMatch: { suggestionId },
+          },
+        },
+      },
+      {
+        $push: {
+          itemStatuses: {
+            suggestionId,
+            status: "added",
+            addedProductId: productId,
+            addedAt: now,
+            dismissedAt: null,
+          },
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (document) {
+      return {
+        document,
+        alreadyAdded: false,
+        sameProduct: true,
+      };
+    }
+
+    // Case 3: Another request may have updated the status first.
+    // Read its result instead of trying to overwrite it.
+    document = await AIInsights.findOne(identity);
+
+    if (!hasSuggestion(document, suggestionId)) {
+      return {
+        document: null,
+        alreadyAdded: false,
+        sameProduct: false,
+      };
+    }
+
+    const existingStatus = findItemStatus(document, suggestionId);
+
+    if (existingStatus?.status === "added") {
+      return {
+        document,
+        alreadyAdded: true,
+        sameProduct:
+          String(existingStatus.addedProductId) === String(productId),
+      };
+    }
+
+    return {
+      document,
+      alreadyAdded: false,
+      sameProduct: false,
+    };
+  },
+
+  /**
+   * Dismiss a suggestion without removing its generated content.
+   *
+   * An added suggestion can never be dismissed.
+   * Repeated dismiss requests are safe.
+   */
+  async dismissItem(key, { suggestionId }) {
+    const identity = keyOf(key);
+
+    const itemFilter = {
+      ...identity,
+      items: {
+        $elemMatch: { id: suggestionId },
+      },
+    };
+
+    const now = new Date();
+
+    // Case 1: Update an existing non-added status.
+    let document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $elemMatch: {
+            suggestionId,
+            status: { $ne: "added" },
+          },
+        },
+      },
+      {
+        $set: {
+          "itemStatuses.$[entry].status": "dismissed",
+          "itemStatuses.$[entry].dismissedAt": now,
+          "itemStatuses.$[entry].addedProductId": null,
+          "itemStatuses.$[entry].addedAt": null,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+        arrayFilters: [
+          {
+            "entry.suggestionId": suggestionId,
+            "entry.status": { $ne: "added" },
+          },
+        ],
+      },
+    );
+
+    if (document) return document;
+
+    // Case 2: No status exists. Insert a dismissed status atomically.
+    document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $not: {
+            $elemMatch: { suggestionId },
+          },
+        },
+      },
+      {
+        $push: {
+          itemStatuses: {
+            suggestionId,
+            status: "dismissed",
+            dismissedAt: now,
+            addedProductId: null,
+            addedAt: null,
+          },
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (document) return document;
+
+    // Case 3: Another request may have won the race.
+    // Return the current document without overwriting its status.
+    document = await AIInsights.findOne(identity);
+
+    if (!hasSuggestion(document, suggestionId)) {
+      return null;
+    }
+
+    return document;
   },
 };
 

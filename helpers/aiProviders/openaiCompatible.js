@@ -57,10 +57,18 @@ function normalizeError(status, message = "") {
 
   if (status === 401 || status === 403) return "AI_KEY_INVALID";
   if (status === 402) return "AI_QUOTA_EXCEEDED";
+  // if (status === 429) {
+  //   return text.includes("quota") || text.includes("daily")
+  //     ? "AI_QUOTA_EXCEEDED"
+  //     : "AI_RATE_LIMIT";
+  // }
   if (status === 429) {
-    return text.includes("quota") || text.includes("daily")
-      ? "AI_QUOTA_EXCEEDED"
-      : "AI_RATE_LIMIT";
+    const quotaOrBalanceError =
+      /quota|daily|insufficient balance|no resource package|resource package|credits? exhausted|balance exhausted|billing limit/.test(
+        text,
+      );
+
+    return quotaOrBalanceError ? "AI_QUOTA_EXCEEDED" : "AI_RATE_LIMIT";
   }
   // 410 is a model that used to exist: NVIDIA answers it for anything past
   // its end of life, and "gone" is a model problem, not an outage.
@@ -158,7 +166,16 @@ function createOpenAiCompatibleProvider({
   keyCheckPath,
   offerModel,
   responseFormat = "json_schema",
+
+  // Provider-specific retry configuration.
+  retryableErrors = [...RETRYABLE],
+  retryDelaysMs = [...RETRY_DELAYS_MS],
+
+  // Provider-specific generation timeout.
+  insightTimeoutMs = INSIGHT_TIMEOUT_MS,
 }) {
+  const providerRetryableErrors = new Set(retryableErrors);
+
   async function call(apiKey, path, { method = "GET", body, timeout }) {
     const res = await fetch(`${baseUrl}${path}`, {
       method,
@@ -306,20 +323,26 @@ function createOpenAiCompatibleProvider({
     try {
       ({ res, json } = await call(apiKey, "/chat/completions", {
         method: "POST",
-        timeout: INSIGHT_TIMEOUT_MS,
+        // timeout: INSIGHT_TIMEOUT_MS,
+        timeout: insightTimeoutMs,
         body: {
           model,
           messages: [
-            ...(systemInstruction || (responseFormat === "json_object" && responseSchema)
-              ? [{
-                  role: "system",
-                  content: [
-                    systemInstruction,
-                    responseFormat === "json_object" && responseSchema
-                      ? `Return only valid JSON matching this schema. Do not include Markdown fences or explanatory text.\nSchema:\n${JSON.stringify(responseSchema)}`
-                      : null,
-                  ].filter(Boolean).join("\n\n"),
-                }]
+            ...(systemInstruction ||
+            (responseFormat === "json_object" && responseSchema)
+              ? [
+                  {
+                    role: "system",
+                    content: [
+                      systemInstruction,
+                      responseFormat === "json_object" && responseSchema
+                        ? `Return only valid JSON matching this schema. Do not include Markdown fences or explanatory text.\nSchema:\n${JSON.stringify(responseSchema)}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n"),
+                  },
+                ]
               : []),
             { role: "user", content: briefing },
           ],
@@ -343,12 +366,28 @@ function createOpenAiCompatibleProvider({
         },
       }));
     } catch (error) {
+      // catch (error) {
+      //   console.warn(
+      //     `[${id}] call failed model=${model} message=${String(
+      //       error?.message ?? "",
+      //     ).slice(0, 300)}`,
+      //   );
+      //   return { ok: false, error: "AI_UNAVAILABLE" };
+      // }
+      const isTimeout =
+        error?.name === "TimeoutError" || error?.name === "AbortError";
+
       console.warn(
-        `[${id}] call failed model=${model} message=${String(
+        `[${id}] call failed model=${model} timeout=${isTimeout} message=${String(
           error?.message ?? "",
         ).slice(0, 300)}`,
       );
-      return { ok: false, error: "AI_UNAVAILABLE" };
+
+      return {
+        ok: false,
+        error: "AI_UNAVAILABLE",
+        retryable: !isTimeout,
+      };
     }
 
     if (!res.ok) {
@@ -418,6 +457,51 @@ function createOpenAiCompatibleProvider({
    * shows up as a slower card rather than an error, and so a retry never costs
    * the merchant one of their hourly slots upstream.
    */
+  // async function generateInsights(
+  //   apiKey,
+  //   {
+  //     briefing,
+  //     systemInstruction,
+  //     responseSchema,
+  //     model = defaultModel,
+  //     maxOutputTokens = INSIGHTS_MAX_OUTPUT_TOKENS,
+  //   },
+  // ) {
+  //   let lastError = "AI_UNAVAILABLE";
+
+  //   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+  //     const result = await generateOnce(apiKey, {
+  //       briefing,
+  //       systemInstruction,
+  //       responseSchema,
+  //       model,
+  //       maxOutputTokens,
+  //     });
+
+  //     if (result.ok) return result;
+
+  //     lastError = result.error;
+  //     console.warn(
+  //       å`[${id}] insights failed model=${model} code=${result.error} attempt=${attempt + 1}`,
+  //     );
+
+  //     // if (!RETRYABLE.has(result.error) || attempt === RETRY_DELAYS_MS.length) {
+  //     //   return result;
+  //     // }
+
+  //     if (
+  //       result.retryable === false ||
+  //       !RETRYABLE.has(result.error) ||
+  //       attempt === RETRY_DELAYS_MS.length
+  //     ) {
+  //       return result;
+  //     }
+  //     await sleep(RETRY_DELAYS_MS[attempt]);
+  //   }
+
+  //   return { ok: false, error: lastError };
+  // }
+
   async function generateInsights(
     apiKey,
     {
@@ -430,7 +514,7 @@ function createOpenAiCompatibleProvider({
   ) {
     let lastError = "AI_UNAVAILABLE";
 
-    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
       const result = await generateOnce(apiKey, {
         briefing,
         systemInstruction,
@@ -442,14 +526,20 @@ function createOpenAiCompatibleProvider({
       if (result.ok) return result;
 
       lastError = result.error;
+
       console.warn(
         `[${id}] insights failed model=${model} code=${result.error} attempt=${attempt + 1}`,
       );
 
-      if (!RETRYABLE.has(result.error) || attempt === RETRY_DELAYS_MS.length) {
+      if (
+        result.retryable === false ||
+        !providerRetryableErrors.has(result.error) ||
+        attempt === retryDelaysMs.length
+      ) {
         return result;
       }
-      await sleep(RETRY_DELAYS_MS[attempt]);
+
+      await sleep(retryDelaysMs[attempt]);
     }
 
     return { ok: false, error: lastError };

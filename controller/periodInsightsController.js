@@ -20,6 +20,9 @@ const {
   supportsMore,
 } = require("../helpers/insightSections");
 
+const isValidProductId = (value) =>
+  typeof value === "string" && /^[a-f\d]{24}$/i.test(value);
+
 /**
  * Insights about a completed analytics period, stored once and read back after.
  *
@@ -174,7 +177,10 @@ const periodInsightsController = {
    */
   async readPeriod(req, res) {
     try {
-      const stored = await aiInsightsStore.readPeriod(req.businessId, req.period);
+      const stored = await aiInsightsStore.readPeriod(
+        req.businessId,
+        req.period,
+      );
 
       /**
        * One entry per section — the newest, when a section has answers under more
@@ -189,7 +195,8 @@ const periodInsightsController = {
       const sections = {};
       for (const document of stored) {
         const current = sections[document.section];
-        if (current && new Date(current.generatedAt) > document.generatedAt) continue;
+        if (current && new Date(current.generatedAt) > document.generatedAt)
+          continue;
         sections[document.section] = document.formatted();
       }
 
@@ -258,8 +265,10 @@ const periodInsightsController = {
           section,
           promptVersion,
         });
-        if (!existing) return res.status(404).json({ error: "NOTHING_TO_EXTEND" });
-        if (existing.noMore) return res.status(409).json({ error: "NO_MORE_AVAILABLE" });
+        if (!existing)
+          return res.status(404).json({ error: "NOTHING_TO_EXTEND" });
+        if (existing.noMore)
+          return res.status(409).json({ error: "NO_MORE_AVAILABLE" });
         if (existing.batches >= MAX_BATCHES) {
           return res.status(409).json({ error: "BATCH_LIMIT_REACHED" });
         }
@@ -267,7 +276,8 @@ const periodInsightsController = {
 
       const briefing =
         typeof req.body?.briefing === "string" ? req.body.briefing.trim() : "";
-      if (!briefing) return res.status(400).json({ error: "BRIEFING_REQUIRED" });
+      if (!briefing)
+        return res.status(400).json({ error: "BRIEFING_REQUIRED" });
       if (briefing.length > MAX_BRIEFING_CHARS) {
         return res.status(400).json({ error: "BRIEFING_TOO_LONG" });
       }
@@ -284,7 +294,8 @@ const periodInsightsController = {
         req.body?.responseSchema && typeof req.body.responseSchema === "object"
           ? req.body.responseSchema
           : null;
-      if (!responseSchema) return res.status(400).json({ error: "SCHEMA_REQUIRED" });
+      if (!responseSchema)
+        return res.status(400).json({ error: "SCHEMA_REQUIRED" });
 
       const settings = await AISettings.findOne({ businessId: req.businessId });
       const providerId = settings?.provider ?? DEFAULT_PROVIDER;
@@ -349,10 +360,9 @@ const periodInsightsController = {
       if (
         cached &&
         mode === "ensure" &&
-        cached.settingsModel === signatureOf(
-          req.generation.providerId,
-          req.generation.credentials,
-        )
+        cached.generatedAt &&
+        cached.settingsModel ===
+          signatureOf(req.generation.providerId, req.generation.credentials)
       ) {
         return res.json({
           data: {
@@ -360,15 +370,23 @@ const periodInsightsController = {
             model: cached.model,
             provider: cached.provider ?? req.generation.providerId,
             settingsModel: cached.settingsModel,
+            generatedAt: cached.generatedAt,
             spent: false,
           },
         });
       }
 
       const lockKey = `${req.businessId}|${req.period.kind}|${req.period.id}|${section}|${promptVersion}|${mode}`;
-      const { shared, result } = await runOnce(lockKey, () =>
-        periodInsightsController.callProvider(req),
-      );
+      const { shared, result } = await runOnce(lockKey, async () => {
+        const generated = await periodInsightsController.callProvider(req);
+
+        if (!generated.ok) return generated;
+
+        return {
+          ...generated,
+          generatedAt: new Date(),
+        };
+      });
 
       if (!result.ok) {
         console.warn(
@@ -402,7 +420,9 @@ const periodInsightsController = {
         });
       }
 
-      const generatedAt = new Date();
+      // const generatedAt = new Date();
+      const generatedAt = result.generatedAt;
+
       try {
         await AIInsightCache.findOneAndUpdate(
           { businessId: req.businessId, cacheKey },
@@ -411,10 +431,7 @@ const periodInsightsController = {
             insights: result.insights,
             model: result.model,
             provider: result.providerId,
-            settingsModel: signatureOf(
-              result.providerId,
-              result.credentials,
-            ),
+            settingsModel: signatureOf(result.providerId, result.credentials),
             generatedAt,
             expiresAt: new Date(generatedAt.getTime() + DRAFT_TTL_MS),
           },
@@ -423,7 +440,9 @@ const periodInsightsController = {
       } catch (error) {
         // A cache write failing must not lose the answer that was just paid for:
         // it is in the reply either way.
-        console.warn(`[period-insights] draft cache write failed: ${error?.message}`);
+        console.warn(
+          `[period-insights] draft cache write failed: ${error?.message}`,
+        );
       }
 
       console.info(
@@ -446,10 +465,8 @@ const periodInsightsController = {
           model: result.model,
           usage: result.usage,
           provider: result.providerId,
-          settingsModel: signatureOf(
-            result.providerId,
-            result.credentials,
-          ),
+          settingsModel: signatureOf(result.providerId, result.credentials),
+          generatedAt,
           spent: !shared,
           shared,
         },
@@ -501,13 +518,18 @@ const periodInsightsController = {
       const empty = req.body?.empty === true;
 
       const items = Array.isArray(req.body?.items) ? req.body.items : null;
-      if (!empty && !items) return res.status(400).json({ error: "ITEMS_REQUIRED" });
+      if (!empty && !items)
+        return res.status(400).json({ error: "ITEMS_REQUIRED" });
 
       const extra =
-        req.body?.extra && typeof req.body.extra === "object" ? req.body.extra : null;
+        req.body?.extra && typeof req.body.extra === "object"
+          ? req.body.extra
+          : null;
       const basis =
         req.body?.basis && typeof req.body.basis === "object"
-          ? Object.fromEntries(Object.entries(req.body.basis).slice(0, MAX_BASIS_KEYS))
+          ? Object.fromEntries(
+              Object.entries(req.body.basis).slice(0, MAX_BASIS_KEYS),
+            )
           : null;
 
       const key = {
@@ -519,15 +541,19 @@ const periodInsightsController = {
       const existing = await aiInsightsStore.readSection(key);
 
       if (mode === "more") {
-        if (!existing) return res.status(404).json({ error: "NOTHING_TO_EXTEND" });
-        if (existing.noMore) return res.status(409).json({ error: "NO_MORE_AVAILABLE" });
+        if (!existing)
+          return res.status(404).json({ error: "NOTHING_TO_EXTEND" });
+        if (existing.noMore)
+          return res.status(409).json({ error: "NO_MORE_AVAILABLE" });
         if (existing.batches >= MAX_BATCHES) {
           return res.status(409).json({ error: "BATCH_LIMIT_REACHED" });
         }
 
         // Cards already present are dropped rather than shown twice: the model is
         // told what to avoid, but being told is not the same as obeying.
-        const seen = new Set(existing.items.map((item) => item?.id).filter(Boolean));
+        const seen = new Set(
+          existing.items.map((item) => item?.id).filter(Boolean),
+        );
         const fresh = items.filter((item) => !item?.id || !seen.has(item.id));
         const appended = await aiInsightsStore.appendItems(key, {
           items: fresh,
@@ -579,6 +605,133 @@ const periodInsightsController = {
       res.json({ data: stored.formatted() });
     } catch (err) {
       internalError(res, err);
+    }
+  },
+
+  /**
+   * Associate a generated menu suggestion with a product created through
+   * the existing POS product API.
+   *
+   * This service stores the association only. It does not create products
+   * or attempt to access the POS Product collection.
+   */
+  async markItemAdded(req, res) {
+    try {
+      const { section, promptVersion, suggestionId } = req.params;
+      const { productId } = req.body ?? {};
+
+      if (section !== "menu-suggestions" || !isPeriodSection(section)) {
+        return res.status(400).json({ error: "INVALID_SECTION" });
+      }
+
+      if (!isPromptVersion(promptVersion)) {
+        return res.status(400).json({ error: "INVALID_PROMPT_VERSION" });
+      }
+
+      if (
+        typeof suggestionId !== "string" ||
+        !suggestionId.trim() ||
+        suggestionId.length > 200
+      ) {
+        return res.status(400).json({ error: "INVALID_SUGGESTION_ID" });
+      }
+
+      if (!isValidProductId(productId)) {
+        return res.status(400).json({ error: "INVALID_PRODUCT_ID" });
+      }
+
+      const result = await aiInsightsStore.markItemAdded(
+        {
+          businessId: req.businessId,
+          period: req.period,
+          section,
+          promptVersion,
+        },
+        {
+          suggestionId,
+          productId,
+        },
+      );
+
+      if (!result.document) {
+        return res.status(404).json({
+          error: "SUGGESTION_NOT_FOUND",
+        });
+      }
+
+      // An already-added suggestion must retain its original product.
+      if (result.alreadyAdded && !result.sameProduct) {
+        return res.status(409).json({
+          error: "SUGGESTION_ALREADY_ADDED",
+          data: result.document.formatted(),
+        });
+      }
+
+      return res.json({
+        data: result.document.formatted(),
+        alreadyAdded: result.alreadyAdded,
+      });
+    } catch (err) {
+      return internalError(res, err);
+    }
+  },
+
+  /**
+   * Dismiss a generated suggestion without deleting it.
+   */
+  async dismissItem(req, res) {
+    try {
+      const { section, promptVersion, suggestionId } = req.params;
+
+      if (section !== "menu-suggestions" || !isPeriodSection(section)) {
+        return res.status(400).json({ error: "INVALID_SECTION" });
+      }
+
+      if (!isPromptVersion(promptVersion)) {
+        return res.status(400).json({ error: "INVALID_PROMPT_VERSION" });
+      }
+
+      if (
+        typeof suggestionId !== "string" ||
+        !suggestionId.trim() ||
+        suggestionId.length > 200
+      ) {
+        return res.status(400).json({ error: "INVALID_SUGGESTION_ID" });
+      }
+
+      const document = await aiInsightsStore.dismissItem(
+        {
+          businessId: req.businessId,
+          period: req.period,
+          section,
+          promptVersion,
+        },
+        { suggestionId },
+      );
+
+      if (!document) {
+        return res.status(404).json({
+          error: "SUGGESTION_NOT_FOUND",
+        });
+      }
+
+      const status = document.itemStatuses.find(
+        (entry) => entry.suggestionId === suggestionId,
+      );
+
+      // Dismissal must never override an existing product association.
+      if (status?.status === "added") {
+        return res.status(409).json({
+          error: "SUGGESTION_ALREADY_ADDED",
+          data: document.formatted(),
+        });
+      }
+
+      return res.json({
+        data: document.formatted(),
+      });
+    } catch (err) {
+      return internalError(res, err);
     }
   },
 

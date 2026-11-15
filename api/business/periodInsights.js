@@ -34,7 +34,12 @@ router.get("/periods", requireBusiness, controller.listPeriods);
  * `latest` as the id means the most recent completed period, so the caller does
  * not have to reimplement the calendar to ask for the default.
  */
-router.get("/:kind/:id", requireBusiness, controller.resolvePeriod, controller.readPeriod);
+router.get(
+  "/:kind/:id",
+  requireBusiness,
+  controller.resolvePeriod,
+  controller.readPeriod,
+);
 
 /**
  * Ask the model for one section, and get the answer back without it being kept.
@@ -68,6 +73,26 @@ router.post(
   requireAdmin,
   controller.resolvePeriod,
   controller.save,
+);
+
+router.patch(
+  "/:kind/:id/:section/:promptVersion/items/:suggestionId/status",
+  // JWT.sessionRequired,
+  requireBusiness,
+  // allowFor(["admin", "basic"]),
+  requireAdmin,
+  controller.resolvePeriod,
+  controller.markItemAdded,
+);
+
+router.patch(
+  "/:kind/:id/:section/:promptVersion/items/:suggestionId/dismiss",
+  // JWT.sessionRequired,
+  requireBusiness,
+  // allowFor(["admin", "basic"]),
+  requireAdmin,
+  controller.resolvePeriod,
+  controller.dismissItem,
 );
 
 module.exports = router;
