@@ -20,7 +20,7 @@ const {
   supportsMore,
 } = require("../helpers/insightSections");
 
-const isValidProductId = (value) =>
+const isValidMongoId = (value) =>
   typeof value === "string" && /^[a-f\d]{24}$/i.test(value);
 
 /**
@@ -608,17 +608,77 @@ const periodInsightsController = {
     }
   },
 
+  // async markItemAdded(req, res) {
+  //   try {
+  //     const { section, promptVersion, suggestionId } = req.params;
+  //     const { productId } = req.body ?? {};
+
+  //     if (section !== "menu-suggestions" || !isPeriodSection(section)) {
+  //       return res.status(400).json({ error: "INVALID_SECTION" });
+  //     }
+
+  //     if (!isPromptVersion(promptVersion)) {
+  //       return res.status(400).json({ error: "INVALID_PROMPT_VERSION" });
+  //     }
+
+  //     if (
+  //       typeof suggestionId !== "string" ||
+  //       !suggestionId.trim() ||
+  //       suggestionId.length > 200
+  //     ) {
+  //       return res.status(400).json({ error: "INVALID_SUGGESTION_ID" });
+  //     }
+
+  //     if (!isValidProductId(productId)) {
+  //       return res.status(400).json({ error: "INVALID_PRODUCT_ID" });
+  //     }
+
+  //     const result = await aiInsightsStore.markItemAdded(
+  //       {
+  //         businessId: req.businessId,
+  //         period: req.period,
+  //         section,
+  //         promptVersion,
+  //       },
+  //       {
+  //         suggestionId,
+  //         productId,
+  //       },
+  //     );
+
+  //     if (!result.document) {
+  //       return res.status(404).json({
+  //         error: "SUGGESTION_NOT_FOUND",
+  //       });
+  //     }
+
+  //     // An already-added suggestion must retain its original product.
+  //     if (result.alreadyAdded && !result.sameProduct) {
+  //       return res.status(409).json({
+  //         error: "SUGGESTION_ALREADY_ADDED",
+  //         data: result.document.formatted(),
+  //       });
+  //     }
+
+  //     return res.json({
+  //       data: result.document.formatted(),
+  //       alreadyAdded: result.alreadyAdded,
+  //     });
+  //   } catch (err) {
+  //     return internalError(res, err);
+  //   }
+  // },
+
   /**
-   * Associate a generated menu suggestion with a product created through
-   * the existing POS product API.
+   * Associate a generated menu suggestion with a product or add-on
+   * created through the existing POS API.
    *
-   * This service stores the association only. It does not create products
-   * or attempt to access the POS Product collection.
+   * This service stores the association only. It does not create either.
    */
   async markItemAdded(req, res) {
     try {
       const { section, promptVersion, suggestionId } = req.params;
-      const { productId } = req.body ?? {};
+      const { productId, addonId } = req.body ?? {};
 
       if (section !== "menu-suggestions" || !isPeriodSection(section)) {
         return res.status(400).json({ error: "INVALID_SECTION" });
@@ -636,8 +696,19 @@ const periodInsightsController = {
         return res.status(400).json({ error: "INVALID_SUGGESTION_ID" });
       }
 
-      if (!isValidProductId(productId)) {
+      // Exactly one association must be supplied.
+      if (Boolean(productId) === Boolean(addonId)) {
+        return res.status(400).json({
+          error: "PRODUCT_OR_ADDON_REQUIRED",
+        });
+      }
+
+      if (productId && !isValidMongoId(productId)) {
         return res.status(400).json({ error: "INVALID_PRODUCT_ID" });
+      }
+
+      if (addonId && !isValidMongoId(addonId)) {
+        return res.status(400).json({ error: "INVALID_ADDON_ID" });
       }
 
       const result = await aiInsightsStore.markItemAdded(
@@ -649,7 +720,7 @@ const periodInsightsController = {
         },
         {
           suggestionId,
-          productId,
+          ...(productId ? { productId } : { addonId }),
         },
       );
 
@@ -659,8 +730,7 @@ const periodInsightsController = {
         });
       }
 
-      // An already-added suggestion must retain its original product.
-      if (result.alreadyAdded && !result.sameProduct) {
+      if (result.alreadyAdded && !result.sameAssociation) {
         return res.status(409).json({
           error: "SUGGESTION_ALREADY_ADDED",
           data: result.document.formatted(),

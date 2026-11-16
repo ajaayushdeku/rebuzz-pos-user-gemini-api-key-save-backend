@@ -45,6 +45,12 @@ const itemStatusSchema = new mongoose.Schema(
       default: null,
     },
 
+    addedAddonId: {
+      type: mongoose.Schema.Types.ObjectId,
+      // ref: "Addon",
+      default: null,
+    },
+
     addedAt: {
       type: Date,
       default: null,
@@ -275,6 +281,10 @@ aiInsightsSchema.methods.formatted = function () {
 
       ...(status?.addedProductId
         ? { addedProductId: String(status.addedProductId) }
+        : {}),
+
+      ...(status?.addedAddonId
+        ? { addedAddonId: String(status.addedAddonId) }
         : {}),
 
       ...(status?.addedAt ? { addedAt: status.addedAt.toISOString() } : {}),
