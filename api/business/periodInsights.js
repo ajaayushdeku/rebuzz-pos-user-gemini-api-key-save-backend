@@ -86,6 +86,16 @@ router.patch(
 );
 
 router.patch(
+  "/:kind/:id/:section/:promptVersion/items/:suggestionId/apply",
+  // JWT.sessionRequired,
+  requireBusiness,
+  // allowFor(["admin", "basic"]),
+  requireAdmin,
+  controller.resolvePeriod,
+  controller.applyPricingAction,
+);
+
+router.patch(
   "/:kind/:id/:section/:promptVersion/items/:suggestionId/dismiss",
   // JWT.sessionRequired,
   requireBusiness,
@@ -93,6 +103,16 @@ router.patch(
   requireAdmin,
   controller.resolvePeriod,
   controller.dismissItem,
+);
+
+router.patch(
+  "/:kind/:id/pricing/:promptVersion/items/:suggestionId/dismiss",
+  // JWT.sessionRequired,
+  requireBusiness,
+  // allowFor(["admin", "basic"]),
+  requireAdmin,
+  controller.resolvePeriod,
+  controller.dismissPricingItem,
 );
 
 module.exports = router;

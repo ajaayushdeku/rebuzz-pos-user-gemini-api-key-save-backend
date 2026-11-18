@@ -35,10 +35,11 @@ const itemStatusSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["added", "dismissed"],
+      enum: ["added", "dismissed", "applied"],
       required: true,
     },
 
+    // Menu Suggestions
     addedProductId: {
       type: mongoose.Schema.Types.ObjectId,
       // ref: "Product",
@@ -52,6 +53,38 @@ const itemStatusSchema = new mongoose.Schema(
     },
 
     addedAt: {
+      type: Date,
+      default: null,
+    },
+
+    // Pricing Opportunities
+    actionType: {
+      type: String,
+      enum: ["price-updated", "discount-removed"],
+      default: null,
+    },
+
+    productId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+
+    variantId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+
+    previousValue: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+
+    appliedValue: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+
+    appliedAt: {
       type: Date,
       default: null,
     },
@@ -277,8 +310,10 @@ aiInsightsSchema.methods.formatted = function () {
 
     return {
       ...item,
+
       status: status?.status ?? "suggested",
 
+      // Menu Suggestions
       ...(status?.addedProductId
         ? { addedProductId: String(status.addedProductId) }
         : {}),
@@ -288,6 +323,25 @@ aiInsightsSchema.methods.formatted = function () {
         : {}),
 
       ...(status?.addedAt ? { addedAt: status.addedAt.toISOString() } : {}),
+
+      // Pricing Opportunities
+      ...(status?.actionType ? { actionType: status.actionType } : {}),
+
+      ...(status?.productId ? { productId: String(status.productId) } : {}),
+
+      ...(status?.variantId ? { variantId: String(status.variantId) } : {}),
+
+      ...(status?.previousValue !== null && status?.previousValue !== undefined
+        ? { previousValue: status.previousValue }
+        : {}),
+
+      ...(status?.appliedValue !== null && status?.appliedValue !== undefined
+        ? { appliedValue: status.appliedValue }
+        : {}),
+
+      ...(status?.appliedAt
+        ? { appliedAt: status.appliedAt.toISOString() }
+        : {}),
 
       ...(status?.dismissedAt
         ? { dismissedAt: status.dismissedAt.toISOString() }

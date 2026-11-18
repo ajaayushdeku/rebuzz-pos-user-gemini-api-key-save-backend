@@ -806,6 +806,171 @@ const periodInsightsController = {
   },
 
   /**
+   * Record a successfully applied Pricing Opportunities action.
+   *
+   * The actual product update happens through the POS API.
+   * This endpoint only records the completed action.
+   */
+  async applyPricingAction(req, res) {
+    try {
+      const { section, promptVersion, suggestionId } = req.params;
+
+      const { actionType, productId, variantId, previousValue, appliedValue } =
+        req.body ?? {};
+
+      if (section !== "pricing" || !isPeriodSection(section)) {
+        return res.status(400).json({ error: "INVALID_SECTION" });
+      }
+
+      if (!isPromptVersion(promptVersion)) {
+        return res.status(400).json({ error: "INVALID_PROMPT_VERSION" });
+      }
+
+      if (
+        typeof suggestionId !== "string" ||
+        !suggestionId.trim() ||
+        suggestionId.length > 200
+      ) {
+        return res.status(400).json({ error: "INVALID_SUGGESTION_ID" });
+      }
+
+      if (!["price-updated", "discount-removed"].includes(actionType)) {
+        return res.status(400).json({ error: "INVALID_ACTION_TYPE" });
+      }
+
+      if (!isValidMongoId(productId)) {
+        return res.status(400).json({ error: "INVALID_PRODUCT_ID" });
+      }
+
+      if (variantId != null && !isValidMongoId(variantId)) {
+        return res.status(400).json({ error: "INVALID_VARIANT_ID" });
+      }
+
+      if (
+        previousValue !== null &&
+        previousValue !== undefined &&
+        (typeof previousValue !== "number" || !Number.isFinite(previousValue))
+      ) {
+        return res.status(400).json({ error: "INVALID_PREVIOUS_VALUE" });
+      }
+
+      if (
+        appliedValue !== null &&
+        appliedValue !== undefined &&
+        (typeof appliedValue !== "number" || !Number.isFinite(appliedValue))
+      ) {
+        return res.status(400).json({ error: "INVALID_APPLIED_VALUE" });
+      }
+
+      if (
+        actionType === "price-updated" &&
+        (typeof previousValue !== "number" ||
+          typeof appliedValue !== "number" ||
+          appliedValue <= 0)
+      ) {
+        return res.status(400).json({ error: "INVALID_PRICE_VALUES" });
+      }
+
+      const result = await aiInsightsStore.applyPricingAction(
+        {
+          businessId: req.businessId,
+          period: req.period,
+          section,
+          promptVersion,
+        },
+        {
+          suggestionId,
+          actionType,
+          productId,
+          variantId: variantId ?? null,
+          previousValue: previousValue ?? null,
+          appliedValue: appliedValue ?? null,
+        },
+      );
+
+      if (!result.document) {
+        return res.status(404).json({
+          error: "SUGGESTION_NOT_FOUND",
+        });
+      }
+
+      if (result.alreadyApplied && !result.sameAction) {
+        return res.status(409).json({
+          error: "SUGGESTION_ALREADY_APPLIED",
+          data: result.document.formatted(),
+        });
+      }
+
+      return res.json({
+        data: result.document.formatted(),
+        alreadyApplied: result.alreadyApplied,
+      });
+    } catch (err) {
+      return internalError(res, err);
+    }
+  },
+
+  /**
+   * Dismiss a Pricing Opportunities suggestion.
+   *
+   * An applied pricing action cannot be dismissed.
+   */
+  async dismissPricingItem(req, res) {
+    try {
+      const { section, promptVersion, suggestionId } = req.params;
+
+      if (section !== "pricing" || !isPeriodSection(section)) {
+        return res.status(400).json({ error: "INVALID_SECTION" });
+      }
+
+      if (!isPromptVersion(promptVersion)) {
+        return res.status(400).json({ error: "INVALID_PROMPT_VERSION" });
+      }
+
+      if (
+        typeof suggestionId !== "string" ||
+        !suggestionId.trim() ||
+        suggestionId.length > 200
+      ) {
+        return res.status(400).json({ error: "INVALID_SUGGESTION_ID" });
+      }
+
+      const document = await aiInsightsStore.dismissPricingItem(
+        {
+          businessId: req.businessId,
+          period: req.period,
+          section,
+          promptVersion,
+        },
+        { suggestionId },
+      );
+
+      if (!document) {
+        return res.status(404).json({
+          error: "SUGGESTION_NOT_FOUND",
+        });
+      }
+
+      const status = document.itemStatuses.find(
+        (entry) => entry.suggestionId === suggestionId,
+      );
+
+      if (status?.status === "applied") {
+        return res.status(409).json({
+          error: "SUGGESTION_ALREADY_APPLIED",
+          data: document.formatted(),
+        });
+      }
+
+      return res.json({
+        data: document.formatted(),
+      });
+    } catch (err) {
+      return internalError(res, err);
+    }
+  },
+
+  /**
    * The provider call itself, and the only place a stored key is decrypted.
    *
    * Separated so the lock above has something to hold, and so a failure comes

@@ -107,9 +107,8 @@ const aiInsightsStore = {
   /**
    * Replace an answer with a newly generated one — what Regenerate does.
    *
-   * The card count resets with it: the new answer is a whole answer, so batches
-   * added to the old one are gone rather than appended to something that no
-   * longer says the same thing.
+   * Generated cards and batches are replaced, but itemStatuses are preserved
+   * so user actions remain recorded across regeneration.
    */
   async replace(
     key,
@@ -128,7 +127,7 @@ const aiInsightsStore = {
           lastRegeneratedAt: generatedAt,
           batches: 1,
           noMore: false,
-          itemStatuses: [],
+          // itemStatuses: [],
         },
         $inc: { revision: 1 },
       },
@@ -531,6 +530,251 @@ const aiInsightsStore = {
             addedProductId: null,
             addedAddonId: null,
             addedAt: null,
+          },
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (document) return document;
+
+    // Case 3: Another request may have won the race.
+    // Return the current document without overwriting its status.
+    document = await AIInsights.findOne(identity);
+
+    if (!hasSuggestion(document, suggestionId)) {
+      return null;
+    }
+
+    return document;
+  },
+
+  /**
+   * Record a successfully applied Pricing Opportunities action.
+   *
+   * Supports:
+   * - price-updated
+   * - discount-removed
+   *
+   * A dismissed suggestion can still be applied.
+   * An already-applied suggestion cannot be applied again or overwritten.
+   *
+   * Conditional atomic updates prevent concurrent requests from creating
+   * duplicate status entries or overwriting an existing applied action.
+   */
+  async applyPricingAction(
+    key,
+    {
+      suggestionId,
+      actionType,
+      productId,
+      variantId = null,
+      previousValue = null,
+      appliedValue = null,
+    },
+  ) {
+    const identity = keyOf(key);
+    const now = new Date();
+
+    const itemFilter = {
+      ...identity,
+      items: {
+        $elemMatch: { id: suggestionId },
+      },
+    };
+
+    const actionStatus = {
+      status: "applied",
+      actionType,
+      productId,
+      variantId,
+      previousValue,
+      appliedValue,
+      appliedAt: now,
+      dismissedAt: null,
+    };
+
+    // Case 1: A dismissed status already exists.
+    // Allow dismissed -> applied, but never overwrite an applied action.
+    let document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $elemMatch: {
+            suggestionId,
+            status: "dismissed",
+          },
+        },
+      },
+      {
+        $set: {
+          "itemStatuses.$[entry].status": "applied",
+          "itemStatuses.$[entry].actionType": actionType,
+          "itemStatuses.$[entry].productId": productId,
+          "itemStatuses.$[entry].variantId": variantId,
+          "itemStatuses.$[entry].previousValue": previousValue,
+          "itemStatuses.$[entry].appliedValue": appliedValue,
+          "itemStatuses.$[entry].appliedAt": now,
+          "itemStatuses.$[entry].dismissedAt": null,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+        arrayFilters: [
+          {
+            "entry.suggestionId": suggestionId,
+            "entry.status": "dismissed",
+          },
+        ],
+      },
+    );
+
+    if (document) {
+      return {
+        document,
+        alreadyApplied: false,
+        sameAction: true,
+      };
+    }
+
+    // Case 2: No status exists yet.
+    // Insert the applied status atomically.
+    document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $not: {
+            $elemMatch: { suggestionId },
+          },
+        },
+      },
+      {
+        $push: {
+          itemStatuses: {
+            suggestionId,
+            ...actionStatus,
+          },
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (document) {
+      return {
+        document,
+        alreadyApplied: false,
+        sameAction: true,
+      };
+    }
+
+    // Case 3: Another request may have won the race.
+    // Read the existing status instead of overwriting it.
+    document = await AIInsights.findOne(identity);
+
+    if (!hasSuggestion(document, suggestionId)) {
+      return {
+        document: null,
+        alreadyApplied: false,
+        sameAction: false,
+      };
+    }
+
+    const existingStatus = findItemStatus(document, suggestionId);
+
+    if (existingStatus?.status === "applied") {
+      const sameAction =
+        existingStatus.actionType === actionType &&
+        String(existingStatus.productId) === String(productId) &&
+        String(existingStatus.variantId ?? "") === String(variantId ?? "") &&
+        existingStatus.previousValue === previousValue &&
+        existingStatus.appliedValue === appliedValue;
+
+      return {
+        document,
+        alreadyApplied: true,
+        sameAction,
+      };
+    }
+
+    return {
+      document,
+      alreadyApplied: false,
+      sameAction: false,
+    };
+  },
+
+  /**
+   * Dismiss a Pricing Opportunities suggestion.
+   *
+   * An applied suggestion can never be dismissed.
+   * Repeated dismiss requests are safe.
+   */
+  async dismissPricingItem(key, { suggestionId }) {
+    const identity = keyOf(key);
+
+    const itemFilter = {
+      ...identity,
+      items: {
+        $elemMatch: { id: suggestionId },
+      },
+    };
+
+    const now = new Date();
+
+    // Case 1: A dismissed status already exists.
+    // Refresh its timestamp without changing any applied action.
+    let document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $elemMatch: {
+            suggestionId,
+            status: "dismissed",
+          },
+        },
+      },
+      {
+        $set: {
+          "itemStatuses.$[entry].dismissedAt": now,
+        },
+      },
+      {
+        new: true,
+        arrayFilters: [
+          {
+            "entry.suggestionId": suggestionId,
+            "entry.status": "dismissed",
+          },
+        ],
+      },
+    );
+
+    if (document) return document;
+
+    // Case 2: No status exists yet.
+    // Insert a dismissed status atomically.
+    document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $not: {
+            $elemMatch: { suggestionId },
+          },
+        },
+      },
+      {
+        $push: {
+          itemStatuses: {
+            suggestionId,
+            status: "dismissed",
+            dismissedAt: now,
           },
         },
       },
