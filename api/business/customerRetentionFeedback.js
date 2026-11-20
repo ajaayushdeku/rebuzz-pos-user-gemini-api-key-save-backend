@@ -23,6 +23,14 @@ router.get(
 );
 
 /**
+ * Business-wide feedback history.
+ *
+ * Retrieves approved/disapproved messages across all periods
+ * with pagination and optional filters.
+ */
+router.get("/history", requireBusiness, controller.listFeedbackHistory);
+
+/**
  * Feedback for one completed period.
  *
  * Used to restore the feedback state of individual messages.

@@ -263,6 +263,90 @@ const customerRetentionFeedbackController = {
   },
 
   /**
+   * GET /customer-retention-feedback/history
+   *
+   * Retrieve business-wide feedback history with pagination,
+   * decision filtering, style filtering and message search.
+   */
+  async listFeedbackHistory(req, res, next) {
+    try {
+      const businessId = getBusinessId(req);
+
+      if (!businessId) {
+        return res.status(401).json({
+          error: "BUSINESS_CONTEXT_REQUIRED",
+        });
+      }
+
+      const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+
+      const limit = Math.min(
+        50,
+        Math.max(1, Number.parseInt(req.query.limit, 10) || 10),
+      );
+
+      const { decision, styleId, search } = req.query;
+
+      const filter = { businessId };
+
+      // Filter by approval decision.
+      if (decision && decision !== "all") {
+        if (!["approved", "disapproved"].includes(decision)) {
+          return res.status(400).json({
+            error: "INVALID_DECISION_FILTER",
+          });
+        }
+
+        filter.decision = decision;
+      }
+
+      // Filter by writing style.
+      if (styleId && styleId !== "all") {
+        filter.styleId = styleId;
+      }
+
+      // Search within the generated message.
+      if (search && search.trim()) {
+        const escapedSearch = search
+          .trim()
+          .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+        filter.message = {
+          $regex: escapedSearch,
+          $options: "i",
+        };
+      }
+
+      const skip = (page - 1) * limit;
+
+      const [items, total] = await Promise.all([
+        CustomerRetentionFeedback.find(filter)
+          .sort({ updatedAt: -1, _id: -1 })
+          .skip(skip)
+          .limit(limit)
+          .select(
+            "messageId message decision rejectionReason styleId styleTitle style periodKind periodId updatedAt createdAt",
+          )
+          .lean(),
+
+        CustomerRetentionFeedback.countDocuments(filter),
+      ]);
+
+      return res.json({
+        items,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
    * PUT /customer-retention-feedback/:kind/:id/:messageId
    *
    * Create or update the current decision for a message.
