@@ -170,6 +170,77 @@ const periodInsightsController = {
   },
 
   /**
+   * List saved insights for the Saved Insights management page.
+   *
+   * Reading is free, so any authenticated business member can view this.
+   * Each row represents one period + section, regardless of prompt versions.
+   */
+  async listSavedInsights(req, res) {
+    try {
+      const {
+        kind,
+        section,
+        search,
+        page: pageParam,
+        limit: limitParam,
+      } = req.query ?? {};
+
+      // Optional period-kind filter.
+      if (kind && !isPeriodKind(kind)) {
+        return res.status(400).json({
+          error: "INVALID_PERIOD_KIND",
+        });
+      }
+
+      // Optional section filter.
+      if (section && (!isSectionName(section) || !isPeriodSection(section))) {
+        return res.status(400).json({
+          error: "INVALID_SECTION",
+        });
+      }
+
+      // Validate pagination rather than silently accepting malformed values.
+      const page = pageParam === undefined ? 1 : Number(pageParam);
+      const limit = limitParam === undefined ? 10 : Number(limitParam);
+
+      if (!Number.isInteger(page) || page < 1) {
+        return res.status(400).json({
+          error: "INVALID_PAGE",
+        });
+      }
+
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return res.status(400).json({
+          error: "INVALID_LIMIT",
+        });
+      }
+
+      if (
+        search !== undefined &&
+        (typeof search !== "string" || search.length > 100)
+      ) {
+        return res.status(400).json({
+          error: "INVALID_SEARCH",
+        });
+      }
+
+      const result = await aiInsightsStore.listSavedInsights(req.businessId, {
+        periodKind: kind,
+        section,
+        search,
+        page,
+        limit,
+      });
+
+      return res.json({
+        data: result,
+      });
+    } catch (err) {
+      return internalError(res, err);
+    }
+  },
+
+  /**
    * Everything stored for one period. No AI call, no spend, whoever is asking.
    *
    * Sections that have never been generated are named in `missing` rather than
@@ -220,6 +291,32 @@ const periodInsightsController = {
       });
     } catch (err) {
       internalError(res, err);
+    }
+  },
+
+  async deleteSection(req, res) {
+    try {
+      const { section } = req.params;
+
+      if (!isSectionName(section) || !isPeriodSection(section)) {
+        return res.status(400).json({
+          success: false,
+          error: "INVALID_SECTION",
+        });
+      }
+
+      const result = await aiInsightsStore.deleteSection({
+        businessId: req.businessId,
+        period: req.period,
+        section,
+      });
+
+      return res.json({
+        success: true,
+        deletedCount: result.deletedCount,
+      });
+    } catch (err) {
+      return internalError(res, err);
     }
   },
 
@@ -887,6 +984,83 @@ const periodInsightsController = {
           appliedValue: appliedValue ?? null,
         },
       );
+
+      if (!result.document) {
+        return res.status(404).json({
+          error: "SUGGESTION_NOT_FOUND",
+        });
+      }
+
+      if (result.alreadyApplied && !result.sameAction) {
+        return res.status(409).json({
+          error: "SUGGESTION_ALREADY_APPLIED",
+          data: result.document.formatted(),
+        });
+      }
+
+      return res.json({
+        data: result.document.formatted(),
+        alreadyApplied: result.alreadyApplied,
+      });
+    } catch (err) {
+      return internalError(res, err);
+    }
+  },
+
+  async completeSlowItemAction(req, res) {
+    try {
+      const { promptVersion, suggestionId } = req.params;
+
+      const { actionType, productId, variantId, discountId, offerId } =
+        req.body ?? {};
+
+      if (!isPromptVersion(promptVersion)) {
+        return res.status(400).json({ error: "INVALID_PROMPT_VERSION" });
+      }
+
+      if (
+        typeof suggestionId !== "string" ||
+        !suggestionId.trim() ||
+        suggestionId.length > 200
+      ) {
+        return res.status(400).json({ error: "INVALID_SUGGESTION_ID" });
+      }
+
+      if (!["discount-applied", "freebie-created"].includes(actionType)) {
+        return res.status(400).json({ error: "INVALID_ACTION_TYPE" });
+      }
+
+      if (!isValidMongoId(productId)) {
+        return res.status(400).json({ error: "INVALID_PRODUCT_ID" });
+      }
+
+      if (variantId != null && !isValidMongoId(variantId)) {
+        return res.status(400).json({ error: "INVALID_VARIANT_ID" });
+      }
+
+      if (actionType === "discount-applied" && !isValidMongoId(discountId)) {
+        return res.status(400).json({ error: "INVALID_DISCOUNT_ID" });
+      }
+
+      if (actionType === "freebie-created" && !isValidMongoId(offerId)) {
+        return res.status(400).json({ error: "INVALID_OFFER_ID" });
+      }
+
+      const key = {
+        businessId: req.businessId,
+        period: req.period,
+        section: "slow-items",
+        promptVersion,
+      };
+
+      const result = await aiInsightsStore.completeSlowItemAction(key, {
+        suggestionId,
+        actionType,
+        productId,
+        variantId: variantId ?? null,
+        discountId: actionType === "discount-applied" ? discountId : null,
+        offerId: actionType === "freebie-created" ? offerId : null,
+      });
 
       if (!result.document) {
         return res.status(404).json({

@@ -1,7 +1,10 @@
 const express = require("express");
 const cors = require("cors");
 
-const { connectDatabase, disconnectDatabase } = require("./configs/dbConnection");
+const {
+  connectDatabase,
+  disconnectDatabase,
+} = require("./configs/dbConnection");
 const { assertEncryptionReady } = require("./helpers/aiCrypto");
 const ApiRouter = require("./routes/api");
 
@@ -29,7 +32,10 @@ function assertConfigured() {
    * advice with no sign that anything was wrong, so this refuses to start rather
    * than warning about it.
    */
-  if (process.env.AI_STUB_PROVIDER === "1" && process.env.NODE_ENV === "production") {
+  if (
+    process.env.AI_STUB_PROVIDER === "1" &&
+    process.env.NODE_ENV === "production"
+  ) {
     throw new Error(
       "AI_STUB_PROVIDER=1 in production: every insight would be fabricated. Remove it.",
     );

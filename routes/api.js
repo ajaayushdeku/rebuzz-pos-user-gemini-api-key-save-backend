@@ -8,6 +8,12 @@ router.use("/ai-insights", require("../api/business/aiInsights"));
 // Period insights.
 router.use("/period-insights", require("../api/business/periodInsights"));
 
+// Festival Prep offer completion.
+router.use(
+  "/festival-prep-actions",
+  require("../api/business/festivalPrepActions"),
+);
+
 // Customer Retention Radar feedback.
 router.use(
   "/customer-retention-feedback",

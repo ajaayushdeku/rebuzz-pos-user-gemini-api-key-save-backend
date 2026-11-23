@@ -25,6 +25,14 @@ const {
  * answer instead of refusing it.
  */
 
+/**
+ * All saved period insights for the management page.
+ *
+ * Supports filtering by period kind and section, searching, and pagination.
+ * Reading saved insights does not spend AI quota.
+ */
+router.get("/saved", requireBusiness, controller.listSavedInsights);
+
 /** Which periods exist, and which already have insights. */
 router.get("/periods", requireBusiness, controller.listPeriods);
 
@@ -75,6 +83,14 @@ router.post(
   controller.save,
 );
 
+router.delete(
+  "/:kind/:id/:section",
+  requireBusiness,
+  requireAdmin,
+  controller.resolvePeriod,
+  controller.deleteSection,
+);
+
 router.patch(
   "/:kind/:id/:section/:promptVersion/items/:suggestionId/status",
   // JWT.sessionRequired,
@@ -93,6 +109,14 @@ router.patch(
   requireAdmin,
   controller.resolvePeriod,
   controller.applyPricingAction,
+);
+
+router.patch(
+  "/:kind/:id/slow-items/:promptVersion/items/:suggestionId/complete",
+  requireBusiness,
+  requireAdmin,
+  controller.resolvePeriod,
+  controller.completeSlowItemAction,
 );
 
 router.patch(

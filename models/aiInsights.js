@@ -60,7 +60,12 @@ const itemStatusSchema = new mongoose.Schema(
     // Pricing Opportunities
     actionType: {
       type: String,
-      enum: ["price-updated", "discount-removed"],
+      enum: [
+        "price-updated",
+        "discount-removed",
+        "discount-applied",
+        "freebie-created",
+      ],
       default: null,
     },
 
@@ -70,6 +75,16 @@ const itemStatusSchema = new mongoose.Schema(
     },
 
     variantId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+
+    discountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+
+    offerId: {
       type: mongoose.Schema.Types.ObjectId,
       default: null,
     },
@@ -330,6 +345,10 @@ aiInsightsSchema.methods.formatted = function () {
       ...(status?.productId ? { productId: String(status.productId) } : {}),
 
       ...(status?.variantId ? { variantId: String(status.variantId) } : {}),
+
+      ...(status?.discountId ? { discountId: String(status.discountId) } : {}),
+
+      ...(status?.offerId ? { offerId: String(status.offerId) } : {}),
 
       ...(status?.previousValue !== null && status?.previousValue !== undefined
         ? { previousValue: status.previousValue }

@@ -58,6 +58,23 @@ const aiInsightsStore = {
   },
 
   /**
+   * Delete every saved prompt version for one section of one period.
+   *
+   * Deleting all versions prevents an older answer from reappearing when
+   * readPeriod() selects the newest remaining document for that section.
+   *
+   * Other sections and periods are not affected.
+   */
+  async deleteSection({ businessId, period, section }) {
+    return AIInsights.deleteMany({
+      businessId,
+      periodKind: period.kind,
+      periodId: period.id,
+      section,
+    });
+  },
+
+  /**
    * Keep a freshly generated answer.
    *
    * `upsert` rather than `create` so a retry after a timeout cannot fail on the
@@ -192,132 +209,122 @@ const aiInsightsStore = {
   },
 
   /**
-   * Mark a suggestion as added to the product catalogue.
+   * List saved insights for the management page.
    *
-   * Uses conditional atomic updates:
-   * 1. Update an existing non-added status.
-   * 2. If no status exists, atomically append one.
-   * 3. If another request won the race, read and return its result.
+   * One row represents one period + section, even if multiple prompt versions
+   * exist. The newest document supplies the displayed metadata.
    *
-   * An existing added association can never be reassigned.
+   * Pagination, filtering and searching happen in MongoDB.
    */
-  // async markItemAdded(key, { suggestionId, productId }) {
-  //   const identity = keyOf(key);
-  //   const now = new Date();
+  async listSavedInsights(
+    businessId,
+    { periodKind, section, search, page = 1, limit = 10 } = {},
+  ) {
+    const match = { businessId };
 
-  //   const itemFilter = {
-  //     ...identity,
-  //     items: {
-  //       $elemMatch: { id: suggestionId },
-  //     },
-  //   };
+    if (periodKind) {
+      match.periodKind = periodKind;
+    }
 
-  //   // Case 1: A status already exists, but it is not "added".
-  //   // This also allows dismissed -> added.
-  //   let document = await AIInsights.findOneAndUpdate(
-  //     {
-  //       ...itemFilter,
-  //       itemStatuses: {
-  //         $elemMatch: {
-  //           suggestionId,
-  //           status: { $ne: "added" },
-  //         },
-  //       },
-  //     },
-  //     {
-  //       $set: {
-  //         "itemStatuses.$[entry].status": "added",
-  //         "itemStatuses.$[entry].addedProductId": productId,
-  //         "itemStatuses.$[entry].addedAt": now,
-  //         "itemStatuses.$[entry].dismissedAt": null,
-  //       },
-  //     },
-  //     {
-  //       new: true,
-  //       runValidators: true,
-  //       arrayFilters: [
-  //         {
-  //           "entry.suggestionId": suggestionId,
-  //           "entry.status": { $ne: "added" },
-  //         },
-  //       ],
-  //     },
-  //   );
+    if (section) {
+      match.section = section;
+    }
 
-  //   if (document) {
-  //     return {
-  //       document,
-  //       alreadyAdded: false,
-  //       sameProduct: true,
-  //     };
-  //   }
+    if (search?.trim()) {
+      const escapedSearch = search
+        .trim()
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const searchRegex = new RegExp(escapedSearch, "i");
 
-  //   // Case 2: No status exists yet.
-  //   // The conditional filter prevents concurrent requests from inserting
-  //   // multiple status entries for the same suggestion.
-  //   document = await AIInsights.findOneAndUpdate(
-  //     {
-  //       ...itemFilter,
-  //       itemStatuses: {
-  //         $not: {
-  //           $elemMatch: { suggestionId },
-  //         },
-  //       },
-  //     },
-  //     {
-  //       $push: {
-  //         itemStatuses: {
-  //           suggestionId,
-  //           status: "added",
-  //           addedProductId: productId,
-  //           addedAt: now,
-  //           dismissedAt: null,
-  //         },
-  //       },
-  //     },
-  //     {
-  //       new: true,
-  //       runValidators: true,
-  //     },
-  //   );
+      match.$or = [{ periodId: searchRegex }, { section: searchRegex }];
+    }
 
-  //   if (document) {
-  //     return {
-  //       document,
-  //       alreadyAdded: false,
-  //       sameProduct: true,
-  //     };
-  //   }
+    const skip = (page - 1) * limit;
 
-  //   // Case 3: Another request may have updated the status first.
-  //   // Read its result instead of trying to overwrite it.
-  //   document = await AIInsights.findOne(identity);
+    const result = await AIInsights.aggregate([
+      { $match: match },
 
-  //   if (!hasSuggestion(document, suggestionId)) {
-  //     return {
-  //       document: null,
-  //       alreadyAdded: false,
-  //       sameProduct: false,
-  //     };
-  //   }
+      // Use the regeneration date when available, otherwise the original
+      // generation date.
+      {
+        $addFields: {
+          lastUpdatedAt: {
+            $max: [
+              "$generatedAt",
+              { $ifNull: ["$lastRegeneratedAt", "$generatedAt"] },
+            ],
+          },
+        },
+      },
 
-  //   const existingStatus = findItemStatus(document, suggestionId);
+      // Ensure the newest prompt version/document is first in each group.
+      {
+        $sort: {
+          lastUpdatedAt: -1,
+          _id: -1,
+        },
+      },
 
-  //   if (existingStatus?.status === "added") {
-  //     return {
-  //       document,
-  //       alreadyAdded: true,
-  //       sameProduct:
-  //         String(existingStatus.addedProductId) === String(productId),
-  //     };
-  //   }
+      // One row per period + section, regardless of prompt version.
+      {
+        $group: {
+          _id: {
+            periodKind: "$periodKind",
+            periodId: "$periodId",
+            section: "$section",
+          },
+          latest: { $first: "$$ROOT" },
+          lastUpdatedAt: { $max: "$lastUpdatedAt" },
+          versionCount: { $sum: 1 },
+          promptVersions: { $addToSet: "$promptVersion" },
+        },
+      },
 
-  //   return {
-  //     document,
-  //     alreadyAdded: false,
-  //     sameProduct: false,
-  //   };
-  // },
+      {
+        $project: {
+          _id: 0,
+          periodKind: "$_id.periodKind",
+          periodId: "$_id.periodId",
+          periodStart: "$latest.periodStart",
+          periodEnd: "$latest.periodEnd",
+          section: "$_id.section",
+          promptVersion: "$latest.promptVersion",
+          promptVersions: 1,
+          versionCount: 1,
+          generatedAt: "$latest.generatedAt",
+          lastRegeneratedAt: "$latest.lastRegeneratedAt",
+          lastUpdatedAt: 1,
+          provider: "$latest.provider",
+          model: "$latest.model",
+          settingsModel: "$latest.settingsModel",
+          revision: "$latest.revision",
+          batches: "$latest.batches",
+          itemCount: { $size: { $ifNull: ["$latest.items", []] } },
+        },
+      },
+
+      { $sort: { lastUpdatedAt: -1, periodStart: -1 } },
+
+      // Return the page and total count from the same aggregation.
+      {
+        $facet: {
+          items: [{ $skip: skip }, { $limit: limit }],
+          metadata: [{ $count: "total" }],
+        },
+      },
+    ]);
+
+    const items = result[0]?.items ?? [];
+    const total = result[0]?.metadata[0]?.total ?? 0;
+
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  },
 
   /**
    * Mark a suggestion as added to the POS catalogue.
@@ -695,6 +702,185 @@ const aiInsightsStore = {
         String(existingStatus.variantId ?? "") === String(variantId ?? "") &&
         existingStatus.previousValue === previousValue &&
         existingStatus.appliedValue === appliedValue;
+
+      return {
+        document,
+        alreadyApplied: true,
+        sameAction,
+      };
+    }
+
+    return {
+      document,
+      alreadyApplied: false,
+      sameAction: false,
+    };
+  },
+
+  /**
+   * Record a successfully completed Slow-Moving Items action.
+   *
+   * Supports:
+   * - discount-applied
+   * - freebie-created
+   *
+   * A dismissed suggestion can still be completed.
+   * An already-completed suggestion cannot be overwritten by another action.
+   *
+   * Conditional atomic updates prevent duplicate status entries and protect
+   * against concurrent requests.
+   */
+  async completeSlowItemAction(
+    key,
+    {
+      suggestionId,
+      actionType,
+      productId,
+      variantId = null,
+      discountId = null,
+      offerId = null,
+    },
+  ) {
+    const identity = keyOf(key);
+    const now = new Date();
+
+    const itemFilter = {
+      ...identity,
+      items: {
+        $elemMatch: { id: suggestionId },
+      },
+    };
+
+    // Only retain the identifier relevant to the selected action.
+    const actionDetails = {
+      actionType,
+      productId,
+      variantId,
+      discountId: actionType === "discount-applied" ? discountId : null,
+      offerId: actionType === "freebie-created" ? offerId : null,
+    };
+
+    const existingDocument = await AIInsights.findOne(identity).lean();
+
+    console.log("[slow-item completion debug]", {
+      identity,
+      requestedSuggestionId: suggestionId,
+      documentFound: Boolean(existingDocument),
+      storedSuggestionIds: existingDocument?.items?.map((item) => ({
+        id: item?.id,
+        ref: item?.ref,
+      })),
+    });
+
+    // Case 1: A dismissed status already exists.
+    // Allow dismissed -> applied.
+    let document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $elemMatch: {
+            suggestionId,
+            status: "dismissed",
+          },
+        },
+      },
+      {
+        $set: {
+          "itemStatuses.$[entry].status": "applied",
+          "itemStatuses.$[entry].actionType": actionDetails.actionType,
+          "itemStatuses.$[entry].productId": actionDetails.productId,
+          "itemStatuses.$[entry].variantId": actionDetails.variantId,
+          "itemStatuses.$[entry].discountId": actionDetails.discountId,
+          "itemStatuses.$[entry].offerId": actionDetails.offerId,
+          "itemStatuses.$[entry].previousValue": null,
+          "itemStatuses.$[entry].appliedValue": null,
+          "itemStatuses.$[entry].appliedAt": now,
+          "itemStatuses.$[entry].dismissedAt": null,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+        arrayFilters: [
+          {
+            "entry.suggestionId": suggestionId,
+            "entry.status": "dismissed",
+          },
+        ],
+      },
+    );
+
+    if (document) {
+      return {
+        document,
+        alreadyApplied: false,
+        sameAction: true,
+      };
+    }
+
+    // Case 2: No status exists yet.
+    // Insert the completed status atomically.
+    document = await AIInsights.findOneAndUpdate(
+      {
+        ...itemFilter,
+        itemStatuses: {
+          $not: {
+            $elemMatch: { suggestionId },
+          },
+        },
+      },
+      {
+        $push: {
+          itemStatuses: {
+            suggestionId,
+            status: "applied",
+            ...actionDetails,
+            previousValue: null,
+            appliedValue: null,
+            appliedAt: now,
+            dismissedAt: null,
+          },
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (document) {
+      return {
+        document,
+        alreadyApplied: false,
+        sameAction: true,
+      };
+    }
+
+    // Case 3: Another request may have won the race,
+    // or this suggestion already has a different status.
+    document = await AIInsights.findOne(identity);
+
+    if (!hasSuggestion(document, suggestionId)) {
+      return {
+        document: null,
+        alreadyApplied: false,
+        sameAction: false,
+      };
+    }
+
+    const existingStatus = findItemStatus(document, suggestionId);
+
+    if (existingStatus?.status === "applied") {
+      const sameAction =
+        existingStatus.actionType === actionDetails.actionType &&
+        String(existingStatus.productId ?? "") ===
+          String(actionDetails.productId ?? "") &&
+        String(existingStatus.variantId ?? "") ===
+          String(actionDetails.variantId ?? "") &&
+        String(existingStatus.discountId ?? "") ===
+          String(actionDetails.discountId ?? "") &&
+        String(existingStatus.offerId ?? "") ===
+          String(actionDetails.offerId ?? "");
 
       return {
         document,
