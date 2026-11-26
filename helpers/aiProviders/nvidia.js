@@ -17,7 +17,7 @@ const BASE = "https://integrate.api.nvidia.com/v1";
  * strict schema. A default, not an allowlist: a key that cannot call it is
  * caught at save time and offered what it can use.
  */
-const DEFAULT_MODEL = "openai/gpt-oss-20b";
+const DEFAULT_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";
 
 /**
  * Families worth offering: ones known to follow `json_schema`.

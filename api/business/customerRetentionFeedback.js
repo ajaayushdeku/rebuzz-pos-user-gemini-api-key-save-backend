@@ -19,6 +19,7 @@ router.get(
   "/preferences",
   // JWT.sessionRequired,
   requireBusiness,
+  requireAdmin,
   controller.getPreferences,
 );
 
@@ -28,7 +29,12 @@ router.get(
  * Retrieves approved/disapproved messages across all periods
  * with pagination and optional filters.
  */
-router.get("/history", requireBusiness, controller.listFeedbackHistory);
+router.get(
+  "/history",
+  requireBusiness,
+  requireAdmin,
+  controller.listFeedbackHistory,
+);
 
 /**
  * Feedback for one completed period.
@@ -39,6 +45,7 @@ router.get(
   "/:kind/:id",
   // JWT.sessionRequired,
   requireBusiness,
+  requireAdmin,
   periodController.resolvePeriod,
   controller.listPeriodFeedback,
 );

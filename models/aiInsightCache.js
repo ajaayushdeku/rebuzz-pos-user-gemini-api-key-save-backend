@@ -65,6 +65,25 @@ const aiInsightCacheSchema = new mongoose.Schema(
       required: true,
     },
 
+    /**
+     * Sales activity when this insight was generated.
+     * Used by Overview to detect whether the cached answer is outdated.
+     */
+    activitySnapshot: {
+      salesCount: {
+        type: Number,
+        default: 0,
+      },
+      totalSales: {
+        type: Number,
+        default: 0,
+      },
+      latestSaleAt: {
+        type: Date,
+        default: null,
+      },
+    },
+
     // TTL index: MongoDB deletes the document once this passes.
     expiresAt: {
       type: Date,

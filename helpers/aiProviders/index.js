@@ -1,22 +1,3 @@
-/**
- * The providers this service can call, behind one interface.
- *
- * Every route works through this file rather than importing a provider
- * directly, so adding a third one is a new entry here plus its own service
- * file — not a change to the settings routes, the insight route or the UI.
- *
- * Each provider exposes the same four calls:
- *   verifyKey(apiKey, model?)  -> { ok, model } | { ok: false, error }
- *   listModels(apiKey)         -> { ok, models } | { ok: false, error }
- *   suggestModels(apiKey)      -> string[]   (names to offer after a 404)
- *   generateInsights(apiKey, { briefing, systemInstruction, responseSchema, model })
- *
- * Errors use one provider-neutral vocabulary, so the frontend has a single set
- * of messages:
- *   AI_KEY_INVALID · AI_QUOTA_EXCEEDED · AI_RATE_LIMIT · AI_MODEL_UNAVAILABLE
- *   AI_UNAVAILABLE · AI_TRUNCATED · AI_EMPTY_RESPONSE · AI_MALFORMED_RESPONSE
- */
-
 const {
   generateInsights: geminiGenerate,
   listAvailableModels: geminiListModels,

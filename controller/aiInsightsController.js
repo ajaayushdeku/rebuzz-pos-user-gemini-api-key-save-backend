@@ -91,6 +91,36 @@ const findLastAnswer = async (req) => {
     .lean();
 };
 
+const getValidActivitySnapshot = (snapshot) => {
+  if (!snapshot || typeof snapshot !== "object") return null;
+
+  const { salesCount, totalSales, latestSaleAt } = snapshot;
+
+  if (
+    !Number.isSafeInteger(salesCount) ||
+    salesCount < 0 ||
+    typeof totalSales !== "number" ||
+    !Number.isFinite(totalSales) ||
+    totalSales < 0
+  ) {
+    return null;
+  }
+
+  if (
+    latestSaleAt !== null &&
+    (typeof latestSaleAt !== "string" ||
+      !Number.isFinite(Date.parse(latestSaleAt)))
+  ) {
+    return null;
+  }
+
+  return {
+    salesCount,
+    totalSales,
+    latestSaleAt: latestSaleAt ? new Date(latestSaleAt) : null,
+  };
+};
+
 /** Keep a fresh answer under its key. Failures are logged, never thrown. */
 const storeInCache = async (req, { insights, model, generatedAt }) => {
   const { cacheKey } = req.insight;
@@ -103,6 +133,9 @@ const storeInCache = async (req, { insights, model, generatedAt }) => {
         adminId: req.adminId,
         insights,
         model,
+        ...(cacheKey.startsWith("overview:")
+          ? { activitySnapshot: req.insight.activitySnapshot ?? null }
+          : {}),
         settingsModel: settingsSignature(req.insight),
         provider: req.insight.providerId,
         generatedAt,
@@ -133,6 +166,71 @@ const aiInsightsController = {
    * uses it, so the plaintext never sits on an object other middleware can
    * see.
    */
+
+  /**
+   * Retrieve today's cached Overview insight without generating anything.
+   */
+  async getOverviewCache(req, res) {
+    try {
+      const settings = await AISettings.findOne({
+        businessId: req.businessId,
+      });
+
+      const providerId = settings?.provider ?? DEFAULT_PROVIDER;
+      const credentials = settings?.[providerId];
+
+      if (!credentials?.apiKey) {
+        return res.status(424).json({ error: "NOT_CONFIGURED" });
+      }
+
+      if (!credentials.enabled) {
+        return res.status(424).json({ error: "AI_DISABLED" });
+      }
+
+      const today = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kathmandu",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date());
+
+      const cacheKey = `overview:v1:${today}`;
+
+      const hit = await AIInsightCache.findOne({
+        businessId: req.businessId,
+        cacheKey,
+        expiresAt: { $gt: new Date() },
+      }).lean();
+
+      if (
+        !hit ||
+        hit.settingsModel !==
+          settingsSignature({
+            providerId,
+            credentials,
+          })
+      ) {
+        return res.status(404).json({
+          error: "OVERVIEW_CACHE_MISS",
+        });
+      }
+
+      return res.json({
+        data: {
+          insights: hit.insights,
+          model: hit.model,
+          provider: hit.provider ?? providerId,
+          usage: null,
+          generatedAt: hit.generatedAt.toISOString(),
+          cached: true,
+          activitySnapshot: hit.activitySnapshot ?? null,
+        },
+      });
+    } catch (err) {
+      return internalError(res, err);
+    }
+  },
+
   async prepare(req, res, next) {
     try {
       const briefing =
@@ -199,8 +297,9 @@ const aiInsightsController = {
         providerId,
         credentials,
         cacheKey: cacheKey ?? null,
-        // Strictly `true`: a stray "false" string must not skip the cache and
-        // spend a call nobody asked for.
+        activitySnapshot: cacheKey?.startsWith("overview:")
+          ? getValidActivitySnapshot(req.body?.activitySnapshot)
+          : null,
         refresh: req.body?.refresh === true,
       };
       next();
@@ -250,10 +349,10 @@ const aiInsightsController = {
           insights: hit.insights,
           model: hit.model,
           provider: hit.provider ?? req.insight.providerId,
-          // Nothing was spent on this request.
           usage: null,
           generatedAt: hit.generatedAt.toISOString(),
           cached: true,
+          activitySnapshot: hit.activitySnapshot ?? null,
         },
       });
     } catch (error) {
@@ -303,6 +402,7 @@ const aiInsightsController = {
           stale: true,
           /** Why a fresh one could not be had, in the usual vocabulary. */
           staleReason: reason,
+          activitySnapshot: hit.activitySnapshot ?? null,
         },
       });
       return true;
@@ -457,6 +557,7 @@ const aiInsightsController = {
           usage: result.usage,
           generatedAt: generatedAt.toISOString(),
           cached: false,
+          activitySnapshot: req.insight.activitySnapshot ?? null,
         },
       });
 
