@@ -129,7 +129,9 @@ customerRetentionFeedbackSchema.index({
   updatedAt: -1,
 });
 
-module.exports = mongoose.model(
+const CustomerRetentionFeedback = mongoose.model(
   "CustomerRetentionFeedback",
   customerRetentionFeedbackSchema,
 );
+
+module.exports = CustomerRetentionFeedback;

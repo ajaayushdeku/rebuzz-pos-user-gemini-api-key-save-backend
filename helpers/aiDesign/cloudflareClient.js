@@ -59,8 +59,10 @@ const createCloudflareError = (status, response) => {
   // Keep provider details available for server-side diagnostics. The API
   // response to the browser still uses our stable application error code.
   error.providerCode = apiError?.code ?? null;
-  error.providerMessage = apiError?.message || response?.messages?.[0]?.message || null;
-  error.requestId = response?.result?.id ?? response?.result?.request_id ?? null;
+  error.providerMessage =
+    apiError?.message || response?.messages?.[0]?.message || null;
+  error.requestId =
+    response?.result?.id ?? response?.result?.request_id ?? null;
   return error;
 };
 

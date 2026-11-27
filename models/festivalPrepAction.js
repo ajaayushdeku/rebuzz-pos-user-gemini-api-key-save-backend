@@ -63,4 +63,9 @@ festivalPrepActionSchema.index(
   { unique: true },
 );
 
-module.exports = mongoose.model("FestivalPrepAction", festivalPrepActionSchema);
+const FestivalPrepAction = mongoose.model(
+  "FestivalPrepAction",
+  festivalPrepActionSchema,
+);
+
+module.exports = FestivalPrepAction;

@@ -142,7 +142,9 @@ const aiSettingsSchema = new mongoose.Schema(
     openrouter: providerCredentialsSchema("openrouter/free"),
     groq: providerCredentialsSchema("openai/gpt-oss-20b"),
     mistral: providerCredentialsSchema("mistral-small-latest"),
-    nvidia: providerCredentialsSchema("openai/gpt-oss-20b"),
+    nvidia: providerCredentialsSchema(
+      "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    ),
     zai: providerCredentialsSchema("glm-4.7-flash"),
 
     // Existing OpenAI image configuration retained for rollback.

@@ -1,5 +1,7 @@
 const CustomerRetentionFeedback = require("../models/customerRetentionFeedback");
 
+const { aiFail, aiSuccess, aiInternalError } = require("../helpers/aiResponse");
+
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_REASON_LENGTH = 500;
 
@@ -9,7 +11,7 @@ const MAX_REASON_LENGTH = 500;
  * Never persist "latest" as the period ID. resolvePeriod should have
  * already converted it into the actual completed period.
  */
-function getPeriodIdentity(req) {
+const getPeriodIdentity = (req) => {
   const period = req.period;
 
   if (!period?.kind || !period?.id) {
@@ -20,17 +22,13 @@ function getPeriodIdentity(req) {
     periodKind: period.kind,
     periodId: period.id,
   };
-}
+};
 
-function getBusinessId(req) {
-  return req.businessId ? String(req.businessId) : null;
-}
+const getBusinessId = (req) => (req.businessId ? String(req.businessId) : null);
 
-function getAdminId(req) {
-  return req.adminId ? String(req.adminId) : null;
-}
+const getAdminId = (req) => (req.adminId ? String(req.adminId) : null);
 
-function sanitizeStyle(style) {
+const sanitizeStyle = (style) => {
   if (style == null) return null;
 
   if (typeof style !== "object" || Array.isArray(style)) {
@@ -51,9 +49,9 @@ function sanitizeStyle(style) {
   }
 
   return sanitized;
-}
+};
 
-function validateFeedbackBody(body) {
+const validateFeedbackBody = (body) => {
   const {
     retentionItemId,
     styleId,
@@ -101,7 +99,7 @@ function validateFeedbackBody(body) {
   }
 
   return null;
-}
+};
 
 const customerRetentionFeedbackController = {
   /**
@@ -116,15 +114,11 @@ const customerRetentionFeedbackController = {
       const periodIdentity = getPeriodIdentity(req);
 
       if (!businessId) {
-        return res.status(401).json({
-          error: "BUSINESS_CONTEXT_REQUIRED",
-        });
+        return aiFail(res, 401, "BUSINESS_CONTEXT_REQUIRED");
       }
 
       if (!periodIdentity) {
-        return res.status(400).json({
-          error: "INVALID_PERIOD_IDENTITY",
-        });
+        return aiFail(res, 400, "INVALID_PERIOD_IDENTITY");
       }
 
       const feedback = await CustomerRetentionFeedback.find({
@@ -134,9 +128,7 @@ const customerRetentionFeedbackController = {
         .sort({ updatedAt: -1 })
         .lean();
 
-      return res.json({
-        feedback,
-      });
+      return aiSuccess(res, { feedback });
     } catch (error) {
       next(error);
     }
@@ -147,16 +139,14 @@ const customerRetentionFeedbackController = {
    *
    * Retrieve business-wide feedback across all periods.
    *
-   * This is the input for the future AI feedback preference builder.
+   * This is the input for the AI feedback preference builder.
    */
   async getPreferences(req, res, next) {
     try {
       const businessId = getBusinessId(req);
 
       if (!businessId) {
-        return res.status(401).json({
-          error: "BUSINESS_CONTEXT_REQUIRED",
-        });
+        return aiFail(res, 401, "BUSINESS_CONTEXT_REQUIRED");
       }
 
       const [
@@ -240,7 +230,7 @@ const customerRetentionFeedbackController = {
           disapproved: item.disapproved,
         }));
 
-      return res.json({
+      return aiSuccess(res, {
         approvedExamples,
         disapprovedExamples,
         preferredStyles,
@@ -273,9 +263,7 @@ const customerRetentionFeedbackController = {
       const businessId = getBusinessId(req);
 
       if (!businessId) {
-        return res.status(401).json({
-          error: "BUSINESS_CONTEXT_REQUIRED",
-        });
+        return aiFail(res, 401, "BUSINESS_CONTEXT_REQUIRED");
       }
 
       const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
@@ -289,23 +277,18 @@ const customerRetentionFeedbackController = {
 
       const filter = { businessId };
 
-      // Filter by approval decision.
       if (decision && decision !== "all") {
         if (!["approved", "disapproved"].includes(decision)) {
-          return res.status(400).json({
-            error: "INVALID_DECISION_FILTER",
-          });
+          return aiFail(res, 400, "INVALID_DECISION_FILTER");
         }
 
         filter.decision = decision;
       }
 
-      // Filter by writing style.
       if (styleId && styleId !== "all") {
         filter.styleId = styleId;
       }
 
-      // Search within the generated message.
       if (search && search.trim()) {
         const escapedSearch = search
           .trim()
@@ -332,7 +315,7 @@ const customerRetentionFeedbackController = {
         CustomerRetentionFeedback.countDocuments(filter),
       ]);
 
-      return res.json({
+      return aiSuccess(res, {
         items,
         pagination: {
           page,
@@ -359,21 +342,15 @@ const customerRetentionFeedbackController = {
       const messageId = req.params.messageId?.trim();
 
       if (!businessId) {
-        return res.status(401).json({
-          error: "BUSINESS_CONTEXT_REQUIRED",
-        });
+        return aiFail(res, 401, "BUSINESS_CONTEXT_REQUIRED");
       }
 
       if (!adminId) {
-        return res.status(403).json({
-          error: "ADMIN_CONTEXT_REQUIRED",
-        });
+        return aiFail(res, 403, "ADMIN_CONTEXT_REQUIRED");
       }
 
       if (!periodIdentity) {
-        return res.status(400).json({
-          error: "INVALID_PERIOD_IDENTITY",
-        });
+        return aiFail(res, 400, "INVALID_PERIOD_IDENTITY");
       }
 
       if (
@@ -381,17 +358,13 @@ const customerRetentionFeedbackController = {
         !/^retmsg_[a-z0-9]+$/i.test(messageId) ||
         messageId.length > 200
       ) {
-        return res.status(400).json({
-          error: "INVALID_MESSAGE_ID",
-        });
+        return aiFail(res, 400, "INVALID_MESSAGE_ID");
       }
 
       const validationError = validateFeedbackBody(req.body);
 
       if (validationError) {
-        return res.status(400).json({
-          error: validationError,
-        });
+        return aiFail(res, 400, validationError);
       }
 
       const {
@@ -410,9 +383,7 @@ const customerRetentionFeedbackController = {
       try {
         sanitizedStyle = sanitizeStyle(style);
       } catch {
-        return res.status(400).json({
-          error: "INVALID_STYLE",
-        });
+        return aiFail(res, 400, "INVALID_STYLE");
       }
 
       const feedback = await CustomerRetentionFeedback.findOneAndUpdate(
@@ -445,7 +416,7 @@ const customerRetentionFeedbackController = {
         },
       ).lean();
 
-      return res.json({
+      return aiSuccess(res, {
         success: true,
         feedback,
       });
@@ -466,21 +437,15 @@ const customerRetentionFeedbackController = {
       const messageId = req.params.messageId?.trim();
 
       if (!businessId) {
-        return res.status(401).json({
-          error: "BUSINESS_CONTEXT_REQUIRED",
-        });
+        return aiFail(res, 401, "BUSINESS_CONTEXT_REQUIRED");
       }
 
       if (!periodIdentity) {
-        return res.status(400).json({
-          error: "INVALID_PERIOD_IDENTITY",
-        });
+        return aiFail(res, 400, "INVALID_PERIOD_IDENTITY");
       }
 
       if (!messageId) {
-        return res.status(400).json({
-          error: "INVALID_MESSAGE_ID",
-        });
+        return aiFail(res, 400, "INVALID_MESSAGE_ID");
       }
 
       const deleted = await CustomerRetentionFeedback.findOneAndDelete({
@@ -490,12 +455,10 @@ const customerRetentionFeedbackController = {
       });
 
       if (!deleted) {
-        return res.status(404).json({
-          error: "FEEDBACK_NOT_FOUND",
-        });
+        return aiFail(res, 404, "FEEDBACK_NOT_FOUND");
       }
 
-      return res.json({
+      return aiSuccess(res, {
         success: true,
         messageId,
       });
